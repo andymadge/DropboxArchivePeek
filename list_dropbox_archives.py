@@ -25,6 +25,7 @@ import glob
 import os
 import sys
 import tarfile
+import threading
 import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -123,15 +124,18 @@ def get_temporary_link(token: str, dropbox_path: str) -> str:
 class _ProgressStream:
     """Wraps a urllib3 response stream to advance a rich progress task as bytes are read."""
 
-    def __init__(self, raw, progress: Progress, task_id: TaskID) -> None:
+    def __init__(self, raw, progress: Progress, task_id: TaskID, agg_task_id: TaskID | None = None) -> None:
         self._raw = raw
         self._progress = progress
         self._task_id = task_id
+        self._agg_task_id = agg_task_id
 
     def read(self, amt=None):
         chunk = self._raw.read(amt)
         if chunk:
             self._progress.advance(self._task_id, len(chunk))
+            if self._agg_task_id is not None:
+                self._progress.advance(self._agg_task_id, len(chunk))
         return chunk
 
     def readable(self):
@@ -147,12 +151,13 @@ def list_archive_contents(
     label: str,
     progress: Progress | None = None,
     task_id: TaskID | None = None,
+    agg_task_id: TaskID | None = None,
 ) -> list[str]:
     with requests.get(url, stream=True) as r:
         r.raise_for_status()
         r.raw.decode_content = True
         if progress is not None and task_id is not None:
-            stream = _ProgressStream(r.raw, progress, task_id)
+            stream = _ProgressStream(r.raw, progress, task_id, agg_task_id)
             with tarfile.open(fileobj=stream, mode="r|gz") as tar:
                 return [member.name for member in tar]
         else:
@@ -205,7 +210,14 @@ def _fmt_duration(seconds: float) -> str:
     return f"{m}m{s:02d}s"
 
 
-def process_one(archive_path: Path, dropbox_root: Path, token: str, progress: Progress) -> None:
+def process_one(
+    archive_path: Path,
+    dropbox_root: Path,
+    token: str,
+    progress: Progress,
+    agg_task_id: TaskID,
+    agg_lock: threading.Lock,
+) -> None:
     name = archive_path.name
     stem = name[: -len(".tar.gz")] if name.endswith(".tar.gz") else archive_path.stem
     output_path = archive_path.parent / (stem + ".txt")
@@ -228,18 +240,20 @@ def process_one(archive_path: Path, dropbox_root: Path, token: str, progress: Pr
     except requests.HTTPError:
         file_size = None
 
+    if file_size:
+        with agg_lock:
+            current_total = progress.tasks[agg_task_id].total or 0
+            progress.update(agg_task_id, total=current_total + file_size)
+
     task_id = None
     try:
         link = get_temporary_link(token, dropbox_path)
         task_id = progress.add_task(name, total=file_size)
 
-        suffix = archive_path.suffix.lower()
-        if suffix == ".zip":
+        if archive_path.suffix.lower() == ".zip":
             contents = list_zip_contents(link)
-        elif suffix in (".tgz", ".gz"):
-            contents = list_archive_contents(link, file_size, name, progress, task_id)
         else:
-            raise ValueError(f"Unsupported archive type: {archive_path.suffix}")
+            contents = list_archive_contents(link, file_size, name, progress, task_id, agg_task_id)
 
         output_path.write_text("\n".join(contents) + "\n")
         elapsed = time.perf_counter() - file_start
@@ -351,10 +365,12 @@ def main():
         TimeRemainingColumn(),
         console=_console,
     ) as progress:
+        agg_task_id = progress.add_task("Total", total=0)
+        agg_lock = threading.Lock()
         with ThreadPoolExecutor(max_workers=args.workers) as executor:
             try:
                 for archive_path in archive_files:
-                    fut = executor.submit(process_one, archive_path, dropbox_root, token, progress)
+                    fut = executor.submit(process_one, archive_path, dropbox_root, token, progress, agg_task_id, agg_lock)
                     futures[fut] = archive_path
                 for fut in as_completed(futures):
                     fut.result()  # surface any unhandled worker exceptions
