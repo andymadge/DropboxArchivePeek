@@ -176,6 +176,13 @@ def resolve_paths(patterns: list[str]) -> list[Path]:
     return paths
 
 
+def _display_path(path: Path) -> str:
+    try:
+        return "~/" + str(path.relative_to(Path.home()))
+    except ValueError:
+        return str(path)
+
+
 def _fmt_duration(seconds: float) -> str:
     if seconds < 60:
         return f"{seconds:.1f}s"
@@ -222,7 +229,7 @@ def main():
             output_path = archive_path.parent / (stem + ".txt")
 
             if output_path.exists():
-                print(f"[SKIP] {name} — listing already exists ({output_path})")
+                print(f"[SKIP] {name} — listing already exists ({_display_path(output_path)})")
                 continue
 
             try:
@@ -256,7 +263,7 @@ def main():
                 print(
                     f"[ OK ] {name} — {len(contents)} entries"
                     f" | {size_str} | {_fmt_duration(elapsed)}"
-                    f" → {output_path}"
+                    f" → {_display_path(output_path)}"
                 )
 
             except requests.HTTPError as e:
