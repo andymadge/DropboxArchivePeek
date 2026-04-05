@@ -258,7 +258,11 @@ def process_one(
     progress: Progress,
     agg_task_id: TaskID,
     agg_lock: threading.Lock,
+    stop_new: threading.Event,
 ) -> None:
+    if stop_new.is_set():
+        return
+
     raw_name = archive_path.name
     label = str(archive_path.relative_to(display_root))
     stem = raw_name[: -len(".tar.gz")] if raw_name.endswith(".tar.gz") else archive_path.stem
@@ -280,7 +284,11 @@ def process_one(
     try:
         metadata = get_file_metadata(token, dropbox_path)
         file_size = metadata.get("size")  # bytes, may be absent for placeholders
-    except requests.HTTPError:
+    except requests.HTTPError as e:
+        if e.response.status_code == 401:
+            stop_new.set()
+            progress.console.print(f"[FAIL] {label} — HTTP 401: {e.response.text}", markup=False)
+            return
         file_size = None
 
     if file_size:
@@ -310,6 +318,8 @@ def process_one(
 
     except requests.HTTPError as e:
         elapsed = time.perf_counter() - file_start
+        if e.response.status_code == 401:
+            stop_new.set()
         progress.console.print(
             f"[FAIL] {label} — HTTP {e.response.status_code}: {e.response.text}"
             f" ({_fmt_duration(elapsed)})",
@@ -411,14 +421,23 @@ def main():
     ) as progress:
         agg_task_id = progress.add_task("Total", total=0)
         agg_lock = threading.Lock()
+        stop_new = threading.Event()
         with ThreadPoolExecutor(max_workers=args.workers) as executor:
             for archive_path, display_root in archive_files:
-                fut = executor.submit(process_one, archive_path, display_root, dropbox_root, token, progress, agg_task_id, agg_lock)
+                fut = executor.submit(process_one, archive_path, display_root, dropbox_root, token, progress, agg_task_id, agg_lock, stop_new)
                 futures[fut] = archive_path
 
             try:
                 for fut in as_completed(futures):
                     fut.result()  # surface any unhandled worker exceptions
+                    if stop_new.is_set():
+                        n = sum(1 for f in futures if f.cancel())
+                        progress.console.print(
+                            "The temporary 4-hour access token has expired.\n"
+                            "Generate a new one at: https://www.dropbox.com/developers/apps"
+                            + (f"\n{n} pending archive(s) cancelled" if n else ""),
+                            markup=False,
+                        )
             except KeyboardInterrupt:
                 cancelled = sum(1 for f in futures if f.cancel())
                 in_progress = sum(1 for f in futures if not f.done() and not f.cancelled())
