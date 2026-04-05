@@ -45,6 +45,7 @@ from rich.progress import (
     TimeRemainingColumn,
     TransferSpeedColumn,
 )
+from rich.table import Column
 
 _console = Console()
 
@@ -382,9 +383,9 @@ def main():
     with Progress(
         TextColumn("{task.description}"),
         BarColumn(),
-        DownloadColumn(),
-        TransferSpeedColumn(),
-        TimeRemainingColumn(),
+        DownloadColumn(table_column=Column(justify="right", no_wrap=True, min_width=14, max_width=14)),
+        TransferSpeedColumn(table_column=Column(justify="right", no_wrap=True, min_width=10, max_width=10)),
+        TimeRemainingColumn(table_column=Column(justify="right", no_wrap=True, min_width=7, max_width=7)),
         console=_console,
     ) as progress:
         agg_task_id = progress.add_task("Total", total=0)
