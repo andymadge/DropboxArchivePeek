@@ -343,26 +343,28 @@ def main():
     total_start = time.perf_counter()
 
     futures = {}
-    try:
-        with Progress(
-            TextColumn("{task.description}"),
-            BarColumn(),
-            DownloadColumn(),
-            TransferSpeedColumn(),
-            TimeRemainingColumn(),
-            console=_console,
-        ) as progress:
-            with ThreadPoolExecutor(max_workers=args.workers) as executor:
+    with Progress(
+        TextColumn("{task.description}"),
+        BarColumn(),
+        DownloadColumn(),
+        TransferSpeedColumn(),
+        TimeRemainingColumn(),
+        console=_console,
+    ) as progress:
+        with ThreadPoolExecutor(max_workers=args.workers) as executor:
+            try:
                 for archive_path in archive_files:
                     fut = executor.submit(process_one, archive_path, dropbox_root, token, progress)
                     futures[fut] = archive_path
                 for fut in as_completed(futures):
                     fut.result()  # surface any unhandled worker exceptions
-    except KeyboardInterrupt:
-        for fut in futures:
-            fut.cancel()
-        print("\n[INTERRUPTED]", file=sys.stderr)
-        sys.exit(130)
+            except KeyboardInterrupt:
+                for fut in futures:
+                    fut.cancel()
+                executor.shutdown(wait=False, cancel_futures=True)
+                progress.stop()
+                print("\n[INTERRUPTED]", file=sys.stderr)
+                os._exit(130)
 
     total_elapsed = time.perf_counter() - total_start
     print(f"\nDone in {_fmt_duration(total_elapsed)}")
