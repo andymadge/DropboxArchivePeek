@@ -225,13 +225,12 @@ def main():
         sys.exit(0)
 
     if args.list:
-        rows = []
         for archive_path in archive_files:
             display = _display_path(archive_path)
             try:
                 dropbox_path = local_to_dropbox_path(archive_path, dropbox_root)
             except ValueError:
-                rows.append((display, "ERR"))
+                print(f"{'ERR':>8}  {display}")
                 continue
             try:
                 metadata = get_file_metadata(token, dropbox_path)
@@ -245,11 +244,7 @@ def main():
                     size_str = "?"
             except requests.HTTPError as e:
                 size_str = f"HTTP {e.response.status_code}"
-            rows.append((display, size_str))
-        if rows:
-            path_width = max(len(p) for p, _ in rows)
-            for path, size_str in rows:
-                print(f"{path:<{path_width}}  {size_str:>8}")
+            print(f"{size_str:>8}  {display}")
         sys.exit(0)
 
     print(f"Processing {len(archive_files)} archive(s)\n")
