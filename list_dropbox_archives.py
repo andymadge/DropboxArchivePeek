@@ -192,6 +192,8 @@ def resolve_paths(patterns: list[str]) -> list[Path]:
             if not path.is_file():
                 print(f"[WARN] Not a file, skipping: {path}", file=sys.stderr)
                 continue
+            if path.suffix.lower() not in (".tgz", ".gz", ".zip"):
+                continue
             paths.append(path)
     return paths
 
