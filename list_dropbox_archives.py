@@ -411,19 +411,61 @@ def main():
         agg_task_id = progress.add_task("Total", total=0)
         agg_lock = threading.Lock()
         with ThreadPoolExecutor(max_workers=args.workers) as executor:
+            for archive_path in archive_files:
+                fut = executor.submit(process_one, archive_path, dropbox_root, token, progress, agg_task_id, agg_lock)
+                futures[fut] = archive_path
+
             try:
-                for archive_path in archive_files:
-                    fut = executor.submit(process_one, archive_path, dropbox_root, token, progress, agg_task_id, agg_lock)
-                    futures[fut] = archive_path
                 for fut in as_completed(futures):
                     fut.result()  # surface any unhandled worker exceptions
             except KeyboardInterrupt:
-                for fut in futures:
-                    fut.cancel()
-                executor.shutdown(wait=False, cancel_futures=True)
+                cancelled = sum(1 for f in futures if f.cancel())
+                in_progress = sum(1 for f in futures if not f.done() and not f.cancelled())
+
                 progress.stop()
-                print("\n[INTERRUPTED]", file=sys.stderr)
-                os._exit(130)
+
+                if in_progress == 0:
+                    sys.stderr.write("\n[INTERRUPTED]\n")
+                    sys.stderr.flush()
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    os._exit(130)
+
+                sys.stderr.write(
+                    f"\n^C Interrupted — {in_progress} file(s) in progress"
+                    + (f", {cancelled} pending cancelled" if cancelled else "")
+                    + f". Finish in-progress files? [y/N]: "
+                )
+                sys.stderr.flush()
+
+                try:
+                    answer = sys.stdin.readline().strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    sys.stderr.write("\n[INTERRUPTED]\n")
+                    sys.stderr.flush()
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    os._exit(130)
+
+                if answer not in ("y", "yes"):
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    sys.stderr.write("[INTERRUPTED]\n")
+                    os._exit(130)
+
+                sys.stderr.write(
+                    f"Finishing {in_progress} in-progress file(s)... (Ctrl+C again to stop immediately)\n"
+                )
+                sys.stderr.flush()
+                progress.start()
+                try:
+                    for fut in list(futures.keys()):
+                        if not fut.cancelled():
+                            try:
+                                fut.result()
+                            except Exception:
+                                pass
+                except KeyboardInterrupt:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    sys.stderr.write("\n[INTERRUPTED]\n")
+                    os._exit(130)
 
     total_elapsed = time.perf_counter() - total_start
     print(f"\nDone in {_fmt_duration(total_elapsed)}")
