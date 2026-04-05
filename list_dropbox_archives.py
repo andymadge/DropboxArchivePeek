@@ -48,13 +48,19 @@ class RangeRequestFile:
     """Seekable file-like object backed by HTTP Range requests."""
 
     def __init__(self, url: str) -> None:
-        head = requests.head(url)
-        head.raise_for_status()
-        content_length = head.headers.get("Content-Length")
-        if content_length is None:
-            raise ValueError("Server did not return Content-Length; cannot use range requests")
+        # Use a minimal range GET (not HEAD) so redirects are followed and we
+        # can confirm the server supports range requests via the 206 status.
+        resp = requests.get(url, headers={"Range": "bytes=0-0"})
+        resp.raise_for_status()
+        if resp.status_code != 206:
+            raise ValueError(
+                f"Server does not support range requests (got {resp.status_code}, expected 206)"
+            )
+        content_range = resp.headers.get("Content-Range", "")
+        if not content_range.startswith("bytes "):
+            raise ValueError(f"Unexpected Content-Range header: {content_range!r}")
         self._url = url
-        self._size = int(content_length)
+        self._size = int(content_range.split("/")[1])
         self._pos = 0
 
     def seekable(self) -> bool:
