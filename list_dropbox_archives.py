@@ -154,51 +154,56 @@ def main():
 
     total_start = time.perf_counter()
 
-    for tgz_path in tgz_files:
-        output_path = tgz_path.parent / (tgz_path.stem + ".txt")
+    try:
+        for tgz_path in tgz_files:
+            output_path = tgz_path.parent / (tgz_path.stem + ".txt")
 
-        if output_path.exists():
-            print(f"[SKIP] {tgz_path.name} — listing already exists ({output_path})")
-            continue
+            if output_path.exists():
+                print(f"[SKIP] {tgz_path.name} — listing already exists ({output_path})")
+                continue
 
-        try:
-            dropbox_path = local_to_dropbox_path(tgz_path, dropbox_root)
-        except ValueError:
-            print(f"[FAIL] {tgz_path} — not under Dropbox root ({dropbox_root})")
-            continue
+            try:
+                dropbox_path = local_to_dropbox_path(tgz_path, dropbox_root)
+            except ValueError:
+                print(f"[FAIL] {tgz_path} — not under Dropbox root ({dropbox_root})")
+                continue
 
-        file_start = time.perf_counter()
+            file_start = time.perf_counter()
 
-        try:
-            metadata = get_file_metadata(token, dropbox_path)
-            file_size = metadata.get("size")  # bytes, may be absent for placeholders
-        except requests.HTTPError:
-            file_size = None
+            try:
+                metadata = get_file_metadata(token, dropbox_path)
+                file_size = metadata.get("size")  # bytes, may be absent for placeholders
+            except requests.HTTPError:
+                file_size = None
 
-        try:
-            link = get_temporary_link(token, dropbox_path)
-            contents = list_archive_contents(link, file_size, tgz_path.name)
-            output_path.write_text("\n".join(contents) + "\n")
-            elapsed = time.perf_counter() - file_start
-            size_str = f"{file_size / 1_048_576:.1f} MB" if file_size else "? MB"
-            print(
-                f"[ OK ] {tgz_path.name} — {len(contents)} entries"
-                f" | {size_str} | {_fmt_duration(elapsed)}"
-                f" → {output_path}"
-            )
+            try:
+                link = get_temporary_link(token, dropbox_path)
+                contents = list_archive_contents(link, file_size, tgz_path.name)
+                output_path.write_text("\n".join(contents) + "\n")
+                elapsed = time.perf_counter() - file_start
+                size_str = f"{file_size / 1_048_576:.1f} MB" if file_size else "? MB"
+                print(
+                    f"[ OK ] {tgz_path.name} — {len(contents)} entries"
+                    f" | {size_str} | {_fmt_duration(elapsed)}"
+                    f" → {output_path}"
+                )
 
-        except requests.HTTPError as e:
-            elapsed = time.perf_counter() - file_start
-            print(
-                f"[FAIL] {tgz_path.name} — HTTP {e.response.status_code}: {e.response.text}"
-                f" ({_fmt_duration(elapsed)})"
-            )
-        except tarfile.TarError as e:
-            elapsed = time.perf_counter() - file_start
-            print(f"[FAIL] {tgz_path.name} — tar error: {e} ({_fmt_duration(elapsed)})")
-        except Exception as e:
-            elapsed = time.perf_counter() - file_start
-            print(f"[FAIL] {tgz_path.name} — {e} ({_fmt_duration(elapsed)})")
+            except requests.HTTPError as e:
+                elapsed = time.perf_counter() - file_start
+                print(
+                    f"[FAIL] {tgz_path.name} — HTTP {e.response.status_code}: {e.response.text}"
+                    f" ({_fmt_duration(elapsed)})"
+                )
+            except tarfile.TarError as e:
+                elapsed = time.perf_counter() - file_start
+                print(f"[FAIL] {tgz_path.name} — tar error: {e} ({_fmt_duration(elapsed)})")
+            except Exception as e:
+                elapsed = time.perf_counter() - file_start
+                print(f"[FAIL] {tgz_path.name} — {e} ({_fmt_duration(elapsed)})")
+
+    except KeyboardInterrupt:
+        print("\n[INTERRUPTED]", file=sys.stderr)
+        sys.exit(130)
 
     total_elapsed = time.perf_counter() - total_start
     print(f"\nDone in {_fmt_duration(total_elapsed)}")
