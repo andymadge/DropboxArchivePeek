@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 """
-List contents of Dropbox Smart Sync placeholder .tgz files without downloading them.
+List contents of Dropbox Smart Sync placeholder .tgz and .zip files without downloading them.
+
+For .tgz files, the archive is streamed and only the tar headers are read.
+For .zip files, HTTP Range requests fetch just the central directory index from the end
+of the file (~3 requests total, regardless of archive size).
 
 Usage:
-    DROPBOX_TOKEN=xxx python3 list_archives.py <pattern> [<pattern> ...]
-    DROPBOX_TOKEN=xxx python3 list_archives.py *.tgz
-    DROPBOX_TOKEN=xxx python3 list_archives.py archive1.tgz archive2.tgz
-    DROPBOX_TOKEN=xxx python3 list_archives.py /path/to/*.tgz /other/path/*.tgz
+    DROPBOX_TOKEN=xxx python3 list_dropbox_archives.py <pattern> [<pattern> ...]
+    DROPBOX_TOKEN=xxx python3 list_dropbox_archives.py *.tgz
+    DROPBOX_TOKEN=xxx python3 list_dropbox_archives.py *.zip
+    DROPBOX_TOKEN=xxx python3 list_dropbox_archives.py *.tgz *.zip
+    DROPBOX_TOKEN=xxx python3 list_dropbox_archives.py archive1.tgz archive2.zip
+    DROPBOX_TOKEN=xxx python3 list_dropbox_archives.py /path/to/*.tgz /other/path/*.zip
 
 Arguments:
     --dropbox-root   Local Dropbox root path (default: ~/Dropbox)
@@ -18,6 +24,7 @@ import os
 import sys
 import tarfile
 import time
+import zipfile
 from pathlib import Path
 
 import requests
@@ -35,6 +42,49 @@ def get_file_metadata(token: str, dropbox_path: str) -> dict:
     )
     resp.raise_for_status()
     return resp.json()
+
+
+class RangeRequestFile:
+    """Seekable file-like object backed by HTTP Range requests."""
+
+    def __init__(self, url: str) -> None:
+        head = requests.head(url)
+        head.raise_for_status()
+        content_length = head.headers.get("Content-Length")
+        if content_length is None:
+            raise ValueError("Server did not return Content-Length; cannot use range requests")
+        self._url = url
+        self._size = int(content_length)
+        self._pos = 0
+
+    def seekable(self) -> bool:
+        return True
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        if whence == 0:
+            self._pos = offset
+        elif whence == 1:
+            self._pos += offset
+        elif whence == 2:
+            self._pos = self._size + offset
+        self._pos = max(0, min(self._pos, self._size))
+        return self._pos
+
+    def tell(self) -> int:
+        return self._pos
+
+    def read(self, n: int = -1) -> bytes:
+        if n == 0:
+            return b""
+        start = self._pos
+        end = self._size - 1 if n == -1 else min(self._pos + n - 1, self._size - 1)
+        if start > end:
+            return b""
+        resp = requests.get(self._url, headers={"Range": f"bytes={start}-{end}"})
+        resp.raise_for_status()
+        data = resp.content
+        self._pos += len(data)
+        return data
 
 
 def get_temporary_link(token: str, dropbox_path: str) -> str:
@@ -89,6 +139,11 @@ def list_archive_contents(url: str, file_size: int | None, label: str) -> list[s
                 return [member.name for member in tar]
 
 
+def list_zip_contents(url: str) -> list[str]:
+    with zipfile.ZipFile(RangeRequestFile(url)) as zf:
+        return zf.namelist()
+
+
 def local_to_dropbox_path(local_path: Path, dropbox_root: Path) -> str:
     relative = local_path.relative_to(dropbox_root)
     return "/" + str(relative).replace(os.sep, "/")
@@ -129,7 +184,7 @@ def main():
     parser.add_argument(
         "files",
         nargs="+",
-        help="Filenames or glob patterns (e.g. *.tgz, /path/to/*.tgz)",
+        help="Filenames or glob patterns (e.g. *.tgz, *.zip, /path/to/*.tgz)",
     )
     parser.add_argument(
         "--dropbox-root",
@@ -144,28 +199,30 @@ def main():
         sys.exit(1)
 
     dropbox_root = Path(args.dropbox_root).expanduser().resolve()
-    tgz_files = resolve_paths(args.files)
+    archive_files = resolve_paths(args.files)
 
-    if not tgz_files:
+    if not archive_files:
         print("No files to process.")
         sys.exit(0)
 
-    print(f"Processing {len(tgz_files)} archive(s)\n")
+    print(f"Processing {len(archive_files)} archive(s)\n")
 
     total_start = time.perf_counter()
 
     try:
-        for tgz_path in tgz_files:
-            output_path = tgz_path.parent / (tgz_path.stem + ".txt")
+        for archive_path in archive_files:
+            name = archive_path.name
+            stem = name[: -len(".tar.gz")] if name.endswith(".tar.gz") else archive_path.stem
+            output_path = archive_path.parent / (stem + ".txt")
 
             if output_path.exists():
-                print(f"[SKIP] {tgz_path.name} — listing already exists ({output_path})")
+                print(f"[SKIP] {name} — listing already exists ({output_path})")
                 continue
 
             try:
-                dropbox_path = local_to_dropbox_path(tgz_path, dropbox_root)
+                dropbox_path = local_to_dropbox_path(archive_path, dropbox_root)
             except ValueError:
-                print(f"[FAIL] {tgz_path} — not under Dropbox root ({dropbox_root})")
+                print(f"[FAIL] {archive_path} — not under Dropbox root ({dropbox_root})")
                 continue
 
             file_start = time.perf_counter()
@@ -178,12 +235,20 @@ def main():
 
             try:
                 link = get_temporary_link(token, dropbox_path)
-                contents = list_archive_contents(link, file_size, tgz_path.name)
+
+                suffix = archive_path.suffix.lower()
+                if suffix == ".zip":
+                    contents = list_zip_contents(link)
+                elif suffix in (".tgz", ".gz"):
+                    contents = list_archive_contents(link, file_size, name)
+                else:
+                    raise ValueError(f"Unsupported archive type: {archive_path.suffix}")
+
                 output_path.write_text("\n".join(contents) + "\n")
                 elapsed = time.perf_counter() - file_start
                 size_str = f"{file_size / 1_048_576:.1f} MB" if file_size else "? MB"
                 print(
-                    f"[ OK ] {tgz_path.name} — {len(contents)} entries"
+                    f"[ OK ] {name} — {len(contents)} entries"
                     f" | {size_str} | {_fmt_duration(elapsed)}"
                     f" → {output_path}"
                 )
@@ -191,15 +256,21 @@ def main():
             except requests.HTTPError as e:
                 elapsed = time.perf_counter() - file_start
                 print(
-                    f"[FAIL] {tgz_path.name} — HTTP {e.response.status_code}: {e.response.text}"
+                    f"[FAIL] {name} — HTTP {e.response.status_code}: {e.response.text}"
                     f" ({_fmt_duration(elapsed)})"
                 )
             except tarfile.TarError as e:
                 elapsed = time.perf_counter() - file_start
-                print(f"[FAIL] {tgz_path.name} — tar error: {e} ({_fmt_duration(elapsed)})")
+                print(f"[FAIL] {name} — tar error: {e} ({_fmt_duration(elapsed)})")
+            except zipfile.BadZipFile as e:
+                elapsed = time.perf_counter() - file_start
+                print(f"[FAIL] {name} — bad zip: {e} ({_fmt_duration(elapsed)})")
+            except ValueError as e:
+                elapsed = time.perf_counter() - file_start
+                print(f"[FAIL] {name} — {e} ({_fmt_duration(elapsed)})")
             except Exception as e:
                 elapsed = time.perf_counter() - file_start
-                print(f"[FAIL] {tgz_path.name} — {e} ({_fmt_duration(elapsed)})")
+                print(f"[FAIL] {name} — {e} ({_fmt_duration(elapsed)})")
 
     except KeyboardInterrupt:
         print("\n[INTERRUPTED]", file=sys.stderr)
