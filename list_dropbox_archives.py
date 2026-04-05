@@ -404,7 +404,7 @@ def main():
         BarColumn(),
         DownloadColumn(table_column=Column(justify="right", no_wrap=True, min_width=14, max_width=14)),
         TransferSpeedColumn(table_column=Column(justify="right", no_wrap=True, min_width=10, max_width=10)),
-        TimeRemainingColumn(table_column=Column(justify="right", no_wrap=True, min_width=7, max_width=7)),
+        TimeRemainingColumn(table_column=Column(justify="right", no_wrap=True, min_width=8, max_width=8)),
         console=_console,
         refresh_per_second=2,
     ) as progress:
