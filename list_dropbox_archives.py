@@ -126,20 +126,39 @@ def get_temporary_link(token: str, dropbox_path: str) -> str:
 
 
 class _ProgressStream:
-    """Wraps a urllib3 response stream to advance a rich progress task as bytes are read."""
+    """Wraps a urllib3 response stream to advance a rich progress task as bytes are read.
+
+    Advances are batched and flushed every _FLUSH_INTERVAL seconds so rich's
+    speed-estimate window covers the intended 30-second period. Without
+    batching, high-throughput streams saturate the 1000-sample deque in
+    seconds, shrinking the effective window and making the rate display noisy.
+    """
+
+    _FLUSH_INTERVAL = 0.25  # seconds between progress.advance() calls
 
     def __init__(self, raw, progress: Progress, task_id: TaskID, agg_task_id: TaskID | None = None) -> None:
         self._raw = raw
         self._progress = progress
         self._task_id = task_id
         self._agg_task_id = agg_task_id
+        self._pending = 0
+        self._pending_agg = 0
+        self._last_flush = time.monotonic()
 
     def read(self, amt=None):
         chunk = self._raw.read(amt)
-        if chunk:
-            self._progress.advance(self._task_id, len(chunk))
-            if self._agg_task_id is not None:
-                self._progress.advance(self._agg_task_id, len(chunk))
+        n = len(chunk) if chunk else 0
+        self._pending += n
+        self._pending_agg += n
+        now = time.monotonic()
+        if not chunk or now - self._last_flush >= self._FLUSH_INTERVAL:
+            if self._pending:
+                self._progress.advance(self._task_id, self._pending)
+                self._pending = 0
+            if self._agg_task_id is not None and self._pending_agg:
+                self._progress.advance(self._agg_task_id, self._pending_agg)
+                self._pending_agg = 0
+            self._last_flush = now
         return chunk
 
     def readable(self):
@@ -387,6 +406,7 @@ def main():
         TransferSpeedColumn(table_column=Column(justify="right", no_wrap=True, min_width=10, max_width=10)),
         TimeRemainingColumn(table_column=Column(justify="right", no_wrap=True, min_width=7, max_width=7)),
         console=_console,
+        refresh_per_second=2,
     ) as progress:
         agg_task_id = progress.add_task("Total", total=0)
         agg_lock = threading.Lock()
