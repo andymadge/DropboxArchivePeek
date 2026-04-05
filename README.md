@@ -13,14 +13,26 @@ Lists the contents of `.tgz` and `.zip` archives stored in Dropbox without downl
 
 ## Setup
 
-Install dependencies and enter the virtual environment:
+### 1. Create a Dropbox API app
+
+1. Go to [https://www.dropbox.com/developers/apps](https://www.dropbox.com/developers/apps) and click **Create app**
+2. Choose **Scoped access**
+3. Choose **Full Dropbox** access
+4. Give your app a name (e.g. `DropboxTgzLister`) and click **Create app**
+5. On the app's **Permissions** tab, enable `files.content.read`, then click **Submit**
+
+### 2. Generate a temporary access token
+
+On the app's **Settings** tab, scroll to **OAuth 2** and click **Generate** under "Generated access token". Copy the token — it expires after 4 hours.
+
+### 3. Install dependencies
 
 ```bash
 pipenv install
 pipenv shell
 ```
 
-Export your Dropbox token:
+### 4. Export your token
 
 ```bash
 export DROPBOX_TOKEN=your_token_here
