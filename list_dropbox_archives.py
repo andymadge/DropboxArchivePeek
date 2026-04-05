@@ -308,7 +308,7 @@ def process_one(
 
         output_path.write_text("\n".join(contents) + "\n")
         elapsed = time.perf_counter() - file_start
-        size_str = f"{file_size / 1_048_576:.1f} MB" if file_size else "? MB"
+        size_str = f"{file_size / 1_048_576:,.1f} MB" if file_size else "? MB"
         progress.console.print(
             f"[ OK ] {label} — {len(contents)} entries"
             f" | {size_str} | {_fmt_duration(elapsed)}"
@@ -395,9 +395,9 @@ def main():
                 file_size = metadata.get("size")
                 if file_size is not None:
                     if file_size >= 1_073_741_824:
-                        size_str = f"{file_size / 1_073_741_824:.1f} GB"
+                        size_str = f"{file_size / 1_073_741_824:,.1f} GB"
                     else:
-                        size_str = f"{file_size / 1_048_576:.1f} MB"
+                        size_str = f"{file_size / 1_048_576:,.1f} MB"
                 else:
                     size_str = "?"
             except requests.HTTPError as e:
