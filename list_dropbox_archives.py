@@ -17,6 +17,7 @@ Usage:
 Arguments:
     --dropbox-root   Local Dropbox root path (default: ~/Dropbox)
     --list           Just list archive files and their sizes without downloading
+    --workers N      Number of parallel workers (default: 1 = sequential)
 """
 
 import argparse
@@ -26,6 +27,7 @@ import sys
 import tarfile
 import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import requests
@@ -128,21 +130,25 @@ class _ProgressStream:
         return False
 
 
-def list_archive_contents(url: str, file_size: int | None, label: str) -> list[str]:
+def list_archive_contents(url: str, file_size: int | None, label: str, show_progress: bool = True) -> list[str]:
     with requests.get(url, stream=True) as r:
         r.raise_for_status()
         r.raw.decode_content = True
-        with tqdm(
-            total=file_size,
-            unit="B",
-            unit_scale=True,
-            unit_divisor=1024,
-            desc=label,
-            leave=False,
-            dynamic_ncols=True,
-        ) as bar:
-            stream = _ProgressStream(r.raw, bar)
-            with tarfile.open(fileobj=stream, mode="r|gz") as tar:
+        if show_progress:
+            with tqdm(
+                total=file_size,
+                unit="B",
+                unit_scale=True,
+                unit_divisor=1024,
+                desc=label,
+                leave=False,
+                dynamic_ncols=True,
+            ) as bar:
+                stream = _ProgressStream(r.raw, bar)
+                with tarfile.open(fileobj=stream, mode="r|gz") as tar:
+                    return [member.name for member in tar]
+        else:
+            with tarfile.open(fileobj=r.raw, mode="r|gz") as tar:
                 return [member.name for member in tar]
 
 
@@ -191,6 +197,69 @@ def _fmt_duration(seconds: float) -> str:
     return f"{m}m{s:02d}s"
 
 
+def process_one(archive_path: Path, dropbox_root: Path, token: str, show_progress: bool) -> None:
+    name = archive_path.name
+    stem = name[: -len(".tar.gz")] if name.endswith(".tar.gz") else archive_path.stem
+    output_path = archive_path.parent / (stem + ".txt")
+
+    if output_path.exists():
+        tqdm.write(f"[SKIP] {name} — listing already exists ({_display_path(output_path)})")
+        return
+
+    try:
+        dropbox_path = local_to_dropbox_path(archive_path, dropbox_root)
+    except ValueError:
+        tqdm.write(f"[FAIL] {archive_path} — not under Dropbox root ({dropbox_root})")
+        return
+
+    file_start = time.perf_counter()
+
+    try:
+        metadata = get_file_metadata(token, dropbox_path)
+        file_size = metadata.get("size")  # bytes, may be absent for placeholders
+    except requests.HTTPError:
+        file_size = None
+
+    try:
+        link = get_temporary_link(token, dropbox_path)
+
+        suffix = archive_path.suffix.lower()
+        if suffix == ".zip":
+            contents = list_zip_contents(link)
+        elif suffix in (".tgz", ".gz"):
+            contents = list_archive_contents(link, file_size, name, show_progress)
+        else:
+            raise ValueError(f"Unsupported archive type: {archive_path.suffix}")
+
+        output_path.write_text("\n".join(contents) + "\n")
+        elapsed = time.perf_counter() - file_start
+        size_str = f"{file_size / 1_048_576:.1f} MB" if file_size else "? MB"
+        tqdm.write(
+            f"[ OK ] {name} — {len(contents)} entries"
+            f" | {size_str} | {_fmt_duration(elapsed)}"
+            f" → {_display_path(output_path)}"
+        )
+
+    except requests.HTTPError as e:
+        elapsed = time.perf_counter() - file_start
+        tqdm.write(
+            f"[FAIL] {name} — HTTP {e.response.status_code}: {e.response.text}"
+            f" ({_fmt_duration(elapsed)})"
+        )
+    except tarfile.TarError as e:
+        elapsed = time.perf_counter() - file_start
+        tqdm.write(f"[FAIL] {name} — tar error: {e} ({_fmt_duration(elapsed)})")
+    except zipfile.BadZipFile as e:
+        elapsed = time.perf_counter() - file_start
+        tqdm.write(f"[FAIL] {name} — bad zip: {e} ({_fmt_duration(elapsed)})")
+    except ValueError as e:
+        elapsed = time.perf_counter() - file_start
+        tqdm.write(f"[FAIL] {name} — {e} ({_fmt_duration(elapsed)})")
+    except Exception as e:
+        elapsed = time.perf_counter() - file_start
+        tqdm.write(f"[FAIL] {name} — {e} ({_fmt_duration(elapsed)})")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -209,6 +278,13 @@ def main():
         "--list",
         action="store_true",
         help="Just list archive files and their sizes without downloading",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Number of parallel workers (default: 1 = sequential)",
     )
     args = parser.parse_args()
 
@@ -247,75 +323,23 @@ def main():
             print(f"{size_str:>8}  {display}")
         sys.exit(0)
 
-    print(f"Processing {len(archive_files)} archive(s)\n")
+    print(f"Processing {len(archive_files)} archive(s) with {args.workers} worker(s)\n")
 
     total_start = time.perf_counter()
+    show_progress = args.workers == 1
 
+    futures = {}
     try:
-        for archive_path in archive_files:
-            name = archive_path.name
-            stem = name[: -len(".tar.gz")] if name.endswith(".tar.gz") else archive_path.stem
-            output_path = archive_path.parent / (stem + ".txt")
-
-            if output_path.exists():
-                print(f"[SKIP] {name} — listing already exists ({_display_path(output_path)})")
-                continue
-
-            try:
-                dropbox_path = local_to_dropbox_path(archive_path, dropbox_root)
-            except ValueError:
-                print(f"[FAIL] {archive_path} — not under Dropbox root ({dropbox_root})")
-                continue
-
-            file_start = time.perf_counter()
-
-            try:
-                metadata = get_file_metadata(token, dropbox_path)
-                file_size = metadata.get("size")  # bytes, may be absent for placeholders
-            except requests.HTTPError:
-                file_size = None
-
-            try:
-                link = get_temporary_link(token, dropbox_path)
-
-                suffix = archive_path.suffix.lower()
-                if suffix == ".zip":
-                    contents = list_zip_contents(link)
-                elif suffix in (".tgz", ".gz"):
-                    contents = list_archive_contents(link, file_size, name)
-                else:
-                    raise ValueError(f"Unsupported archive type: {archive_path.suffix}")
-
-                output_path.write_text("\n".join(contents) + "\n")
-                elapsed = time.perf_counter() - file_start
-                size_str = f"{file_size / 1_048_576:.1f} MB" if file_size else "? MB"
-                print(
-                    f"[ OK ] {name} — {len(contents)} entries"
-                    f" | {size_str} | {_fmt_duration(elapsed)}"
-                    f" → {_display_path(output_path)}"
-                )
-
-            except requests.HTTPError as e:
-                elapsed = time.perf_counter() - file_start
-                print(
-                    f"[FAIL] {name} — HTTP {e.response.status_code}: {e.response.text}"
-                    f" ({_fmt_duration(elapsed)})"
-                )
-            except tarfile.TarError as e:
-                elapsed = time.perf_counter() - file_start
-                print(f"[FAIL] {name} — tar error: {e} ({_fmt_duration(elapsed)})")
-            except zipfile.BadZipFile as e:
-                elapsed = time.perf_counter() - file_start
-                print(f"[FAIL] {name} — bad zip: {e} ({_fmt_duration(elapsed)})")
-            except ValueError as e:
-                elapsed = time.perf_counter() - file_start
-                print(f"[FAIL] {name} — {e} ({_fmt_duration(elapsed)})")
-            except Exception as e:
-                elapsed = time.perf_counter() - file_start
-                print(f"[FAIL] {name} — {e} ({_fmt_duration(elapsed)})")
-
+        with ThreadPoolExecutor(max_workers=args.workers) as executor:
+            for archive_path in archive_files:
+                fut = executor.submit(process_one, archive_path, dropbox_root, token, show_progress)
+                futures[fut] = archive_path
+            for fut in as_completed(futures):
+                fut.result()  # surface any unhandled worker exceptions
     except KeyboardInterrupt:
-        print("\n[INTERRUPTED]", file=sys.stderr)
+        for fut in futures:
+            fut.cancel()
+        tqdm.write("\n[INTERRUPTED]", file=sys.stderr)
         sys.exit(130)
 
     total_elapsed = time.perf_counter() - total_start
