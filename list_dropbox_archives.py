@@ -201,14 +201,19 @@ def local_to_dropbox_path(local_path: Path, dropbox_root: Path) -> str:
 _ARCHIVE_SUFFIXES = {".tgz", ".gz", ".zip"}
 
 
-def resolve_paths(patterns: list[str]) -> list[Path]:
+def resolve_paths(patterns: list[str]) -> list[tuple[Path, Path]]:
     """Expand wildcards and resolve to absolute paths, deduplicating.
+
+    Returns a list of (archive_path, display_root) pairs. For directory
+    arguments, display_root is the directory so paths can be shown relative
+    to it. For individual files or globs, display_root is the file's parent
+    (equivalent to showing just the filename).
 
     If a pattern resolves to a directory, all archive files within it are
     found recursively.
     """
-    seen = set()
-    paths = []
+    seen: set[Path] = set()
+    paths: list[tuple[Path, Path]] = []
     for pattern in patterns:
         candidate = Path(os.path.expanduser(pattern)).resolve()
         if candidate.is_dir():
@@ -218,7 +223,7 @@ def resolve_paths(patterns: list[str]) -> list[Path]:
             for path in matches:
                 if path not in seen:
                     seen.add(path)
-                    paths.append(path)
+                    paths.append((path, candidate))
             continue
         expanded = glob.glob(os.path.expanduser(pattern))
         if not expanded:
@@ -234,15 +239,8 @@ def resolve_paths(patterns: list[str]) -> list[Path]:
                 continue
             if path.suffix.lower() not in _ARCHIVE_SUFFIXES:
                 continue
-            paths.append(path)
+            paths.append((path, path.parent))
     return paths
-
-
-def _display_path(path: Path) -> str:
-    try:
-        return "~/" + str(path.relative_to(Path.home()))
-    except ValueError:
-        return str(path)
 
 
 def _fmt_duration(seconds: float) -> str:
@@ -254,24 +252,27 @@ def _fmt_duration(seconds: float) -> str:
 
 def process_one(
     archive_path: Path,
+    display_root: Path,
     dropbox_root: Path,
     token: str,
     progress: Progress,
     agg_task_id: TaskID,
     agg_lock: threading.Lock,
 ) -> None:
-    name = archive_path.name
-    stem = name[: -len(".tar.gz")] if name.endswith(".tar.gz") else archive_path.stem
+    raw_name = archive_path.name
+    label = str(archive_path.relative_to(display_root))
+    stem = raw_name[: -len(".tar.gz")] if raw_name.endswith(".tar.gz") else archive_path.stem
     output_path = archive_path.parent / (stem + ".txt")
+    output_label = str(output_path.relative_to(display_root))
 
     if output_path.exists():
-        progress.console.print(f"[SKIP] {name} — listing already exists ({_display_path(output_path)})", markup=False)
+        progress.console.print(f"[SKIP] {label} — listing already exists ({output_label})", markup=False)
         return
 
     try:
         dropbox_path = local_to_dropbox_path(archive_path, dropbox_root)
     except ValueError:
-        progress.console.print(f"[FAIL] {archive_path} — not under Dropbox root ({dropbox_root})", markup=False)
+        progress.console.print(f"[FAIL] {label} — not under Dropbox root ({dropbox_root})", markup=False)
         return
 
     file_start = time.perf_counter()
@@ -290,42 +291,42 @@ def process_one(
     task_id = None
     try:
         link = get_temporary_link(token, dropbox_path)
-        task_id = progress.add_task(name, total=file_size)
+        task_id = progress.add_task(label, total=file_size)
 
         if archive_path.suffix.lower() == ".zip":
             contents = list_zip_contents(link)
         else:
-            contents = list_archive_contents(link, file_size, name, progress, task_id, agg_task_id)
+            contents = list_archive_contents(link, file_size, label, progress, task_id, agg_task_id)
 
         output_path.write_text("\n".join(contents) + "\n")
         elapsed = time.perf_counter() - file_start
         size_str = f"{file_size / 1_048_576:.1f} MB" if file_size else "? MB"
         progress.console.print(
-            f"[ OK ] {name} — {len(contents)} entries"
+            f"[ OK ] {label} — {len(contents)} entries"
             f" | {size_str} | {_fmt_duration(elapsed)}"
-            f" → {_display_path(output_path)}",
+            f" → {output_label}",
             markup=False,
         )
 
     except requests.HTTPError as e:
         elapsed = time.perf_counter() - file_start
         progress.console.print(
-            f"[FAIL] {name} — HTTP {e.response.status_code}: {e.response.text}"
+            f"[FAIL] {label} — HTTP {e.response.status_code}: {e.response.text}"
             f" ({_fmt_duration(elapsed)})",
             markup=False,
         )
     except tarfile.TarError as e:
         elapsed = time.perf_counter() - file_start
-        progress.console.print(f"[FAIL] {name} — tar error: {e} ({_fmt_duration(elapsed)})", markup=False)
+        progress.console.print(f"[FAIL] {label} — tar error: {e} ({_fmt_duration(elapsed)})", markup=False)
     except zipfile.BadZipFile as e:
         elapsed = time.perf_counter() - file_start
-        progress.console.print(f"[FAIL] {name} — bad zip: {e} ({_fmt_duration(elapsed)})", markup=False)
+        progress.console.print(f"[FAIL] {label} — bad zip: {e} ({_fmt_duration(elapsed)})", markup=False)
     except ValueError as e:
         elapsed = time.perf_counter() - file_start
-        progress.console.print(f"[FAIL] {name} — {e} ({_fmt_duration(elapsed)})", markup=False)
+        progress.console.print(f"[FAIL] {label} — {e} ({_fmt_duration(elapsed)})", markup=False)
     except Exception as e:
         elapsed = time.perf_counter() - file_start
-        progress.console.print(f"[FAIL] {name} — {e} ({_fmt_duration(elapsed)})", markup=False)
+        progress.console.print(f"[FAIL] {label} — {e} ({_fmt_duration(elapsed)})", markup=False)
     finally:
         if task_id is not None:
             progress.remove_task(task_id)
@@ -372,12 +373,12 @@ def main():
         sys.exit(0)
 
     if args.list:
-        for archive_path in archive_files:
-            display = _display_path(archive_path)
+        for archive_path, display_root in archive_files:
+            label = str(archive_path.relative_to(display_root))
             try:
                 dropbox_path = local_to_dropbox_path(archive_path, dropbox_root)
             except ValueError:
-                print(f"{'ERR':>8}  {display}")
+                print(f"{'ERR':>8}  {label}")
                 continue
             try:
                 metadata = get_file_metadata(token, dropbox_path)
@@ -391,7 +392,7 @@ def main():
                     size_str = "?"
             except requests.HTTPError as e:
                 size_str = f"HTTP {e.response.status_code}"
-            print(f"{size_str:>8}  {display}")
+            print(f"{size_str:>8}  {label}")
         sys.exit(0)
 
     print(f"Processing {len(archive_files)} archive(s) with {args.workers} worker(s)\n")
@@ -411,8 +412,8 @@ def main():
         agg_task_id = progress.add_task("Total", total=0)
         agg_lock = threading.Lock()
         with ThreadPoolExecutor(max_workers=args.workers) as executor:
-            for archive_path in archive_files:
-                fut = executor.submit(process_one, archive_path, dropbox_root, token, progress, agg_task_id, agg_lock)
+            for archive_path, display_root in archive_files:
+                fut = executor.submit(process_one, archive_path, display_root, dropbox_root, token, progress, agg_task_id, agg_lock)
                 futures[fut] = archive_path
 
             try:
