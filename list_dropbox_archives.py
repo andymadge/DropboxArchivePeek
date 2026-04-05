@@ -16,6 +16,7 @@ Usage:
 
 Arguments:
     --dropbox-root   Local Dropbox root path (default: ~/Dropbox)
+    --list           Just list archive files and their sizes without downloading
 """
 
 import argparse
@@ -204,6 +205,11 @@ def main():
         default="~/Dropbox",
         help="Local Dropbox root directory (default: ~/Dropbox)",
     )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="Just list archive files and their sizes without downloading",
+    )
     args = parser.parse_args()
 
     token = os.environ.get("DROPBOX_TOKEN")
@@ -216,6 +222,34 @@ def main():
 
     if not archive_files:
         print("No files to process.")
+        sys.exit(0)
+
+    if args.list:
+        rows = []
+        for archive_path in archive_files:
+            display = _display_path(archive_path)
+            try:
+                dropbox_path = local_to_dropbox_path(archive_path, dropbox_root)
+            except ValueError:
+                rows.append((display, "ERR"))
+                continue
+            try:
+                metadata = get_file_metadata(token, dropbox_path)
+                file_size = metadata.get("size")
+                if file_size is not None:
+                    if file_size >= 1_073_741_824:
+                        size_str = f"{file_size / 1_073_741_824:.1f} GB"
+                    else:
+                        size_str = f"{file_size / 1_048_576:.1f} MB"
+                else:
+                    size_str = "?"
+            except requests.HTTPError as e:
+                size_str = f"HTTP {e.response.status_code}"
+            rows.append((display, size_str))
+        if rows:
+            path_width = max(len(p) for p, _ in rows)
+            for path, size_str in rows:
+                print(f"{path:<{path_width}}  {size_str:>8}")
         sys.exit(0)
 
     print(f"Processing {len(archive_files)} archive(s)\n")
