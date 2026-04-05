@@ -31,7 +31,18 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import requests
-from tqdm import tqdm
+from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    DownloadColumn,
+    Progress,
+    TaskID,
+    TextColumn,
+    TimeRemainingColumn,
+    TransferSpeedColumn,
+)
+
+_console = Console()
 
 
 def get_file_metadata(token: str, dropbox_path: str) -> dict:
@@ -110,19 +121,19 @@ def get_temporary_link(token: str, dropbox_path: str) -> str:
 
 
 class _ProgressStream:
-    """Wraps a urllib3 response stream to update a tqdm bar as bytes are read."""
+    """Wraps a urllib3 response stream to advance a rich progress task as bytes are read."""
 
-    def __init__(self, raw, bar: tqdm):
+    def __init__(self, raw, progress: Progress, task_id: TaskID) -> None:
         self._raw = raw
-        self._bar = bar
+        self._progress = progress
+        self._task_id = task_id
 
     def read(self, amt=None):
         chunk = self._raw.read(amt)
         if chunk:
-            self._bar.update(len(chunk))
+            self._progress.advance(self._task_id, len(chunk))
         return chunk
 
-    # tarfile also calls readable() / seekable() on some paths
     def readable(self):
         return True
 
@@ -130,23 +141,20 @@ class _ProgressStream:
         return False
 
 
-def list_archive_contents(url: str, file_size: int | None, label: str, show_progress: bool = True) -> list[str]:
+def list_archive_contents(
+    url: str,
+    file_size: int | None,
+    label: str,
+    progress: Progress | None = None,
+    task_id: TaskID | None = None,
+) -> list[str]:
     with requests.get(url, stream=True) as r:
         r.raise_for_status()
         r.raw.decode_content = True
-        if show_progress:
-            with tqdm(
-                total=file_size,
-                unit="B",
-                unit_scale=True,
-                unit_divisor=1024,
-                desc=label,
-                leave=False,
-                dynamic_ncols=True,
-            ) as bar:
-                stream = _ProgressStream(r.raw, bar)
-                with tarfile.open(fileobj=stream, mode="r|gz") as tar:
-                    return [member.name for member in tar]
+        if progress is not None and task_id is not None:
+            stream = _ProgressStream(r.raw, progress, task_id)
+            with tarfile.open(fileobj=stream, mode="r|gz") as tar:
+                return [member.name for member in tar]
         else:
             with tarfile.open(fileobj=r.raw, mode="r|gz") as tar:
                 return [member.name for member in tar]
@@ -197,19 +205,19 @@ def _fmt_duration(seconds: float) -> str:
     return f"{m}m{s:02d}s"
 
 
-def process_one(archive_path: Path, dropbox_root: Path, token: str, show_progress: bool) -> None:
+def process_one(archive_path: Path, dropbox_root: Path, token: str, progress: Progress) -> None:
     name = archive_path.name
     stem = name[: -len(".tar.gz")] if name.endswith(".tar.gz") else archive_path.stem
     output_path = archive_path.parent / (stem + ".txt")
 
     if output_path.exists():
-        tqdm.write(f"[SKIP] {name} — listing already exists ({_display_path(output_path)})")
+        progress.console.print(f"[SKIP] {name} — listing already exists ({_display_path(output_path)})", markup=False)
         return
 
     try:
         dropbox_path = local_to_dropbox_path(archive_path, dropbox_root)
     except ValueError:
-        tqdm.write(f"[FAIL] {archive_path} — not under Dropbox root ({dropbox_root})")
+        progress.console.print(f"[FAIL] {archive_path} — not under Dropbox root ({dropbox_root})", markup=False)
         return
 
     file_start = time.perf_counter()
@@ -220,44 +228,51 @@ def process_one(archive_path: Path, dropbox_root: Path, token: str, show_progres
     except requests.HTTPError:
         file_size = None
 
+    task_id = None
     try:
         link = get_temporary_link(token, dropbox_path)
+        task_id = progress.add_task(name, total=file_size)
 
         suffix = archive_path.suffix.lower()
         if suffix == ".zip":
             contents = list_zip_contents(link)
         elif suffix in (".tgz", ".gz"):
-            contents = list_archive_contents(link, file_size, name, show_progress)
+            contents = list_archive_contents(link, file_size, name, progress, task_id)
         else:
             raise ValueError(f"Unsupported archive type: {archive_path.suffix}")
 
         output_path.write_text("\n".join(contents) + "\n")
         elapsed = time.perf_counter() - file_start
         size_str = f"{file_size / 1_048_576:.1f} MB" if file_size else "? MB"
-        tqdm.write(
+        progress.console.print(
             f"[ OK ] {name} — {len(contents)} entries"
             f" | {size_str} | {_fmt_duration(elapsed)}"
-            f" → {_display_path(output_path)}"
+            f" → {_display_path(output_path)}",
+            markup=False,
         )
 
     except requests.HTTPError as e:
         elapsed = time.perf_counter() - file_start
-        tqdm.write(
+        progress.console.print(
             f"[FAIL] {name} — HTTP {e.response.status_code}: {e.response.text}"
-            f" ({_fmt_duration(elapsed)})"
+            f" ({_fmt_duration(elapsed)})",
+            markup=False,
         )
     except tarfile.TarError as e:
         elapsed = time.perf_counter() - file_start
-        tqdm.write(f"[FAIL] {name} — tar error: {e} ({_fmt_duration(elapsed)})")
+        progress.console.print(f"[FAIL] {name} — tar error: {e} ({_fmt_duration(elapsed)})", markup=False)
     except zipfile.BadZipFile as e:
         elapsed = time.perf_counter() - file_start
-        tqdm.write(f"[FAIL] {name} — bad zip: {e} ({_fmt_duration(elapsed)})")
+        progress.console.print(f"[FAIL] {name} — bad zip: {e} ({_fmt_duration(elapsed)})", markup=False)
     except ValueError as e:
         elapsed = time.perf_counter() - file_start
-        tqdm.write(f"[FAIL] {name} — {e} ({_fmt_duration(elapsed)})")
+        progress.console.print(f"[FAIL] {name} — {e} ({_fmt_duration(elapsed)})", markup=False)
     except Exception as e:
         elapsed = time.perf_counter() - file_start
-        tqdm.write(f"[FAIL] {name} — {e} ({_fmt_duration(elapsed)})")
+        progress.console.print(f"[FAIL] {name} — {e} ({_fmt_duration(elapsed)})", markup=False)
+    finally:
+        if task_id is not None:
+            progress.remove_task(task_id)
 
 
 def main():
@@ -326,20 +341,27 @@ def main():
     print(f"Processing {len(archive_files)} archive(s) with {args.workers} worker(s)\n")
 
     total_start = time.perf_counter()
-    show_progress = args.workers == 1
 
     futures = {}
     try:
-        with ThreadPoolExecutor(max_workers=args.workers) as executor:
-            for archive_path in archive_files:
-                fut = executor.submit(process_one, archive_path, dropbox_root, token, show_progress)
-                futures[fut] = archive_path
-            for fut in as_completed(futures):
-                fut.result()  # surface any unhandled worker exceptions
+        with Progress(
+            TextColumn("{task.description}"),
+            BarColumn(),
+            DownloadColumn(),
+            TransferSpeedColumn(),
+            TimeRemainingColumn(),
+            console=_console,
+        ) as progress:
+            with ThreadPoolExecutor(max_workers=args.workers) as executor:
+                for archive_path in archive_files:
+                    fut = executor.submit(process_one, archive_path, dropbox_root, token, progress)
+                    futures[fut] = archive_path
+                for fut in as_completed(futures):
+                    fut.result()  # surface any unhandled worker exceptions
     except KeyboardInterrupt:
         for fut in futures:
             fut.cancel()
-        tqdm.write("\n[INTERRUPTED]", file=sys.stderr)
+        print("\n[INTERRUPTED]", file=sys.stderr)
         sys.exit(130)
 
     total_elapsed = time.perf_counter() - total_start
