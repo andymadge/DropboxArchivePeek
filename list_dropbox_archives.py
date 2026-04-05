@@ -18,6 +18,9 @@ Arguments:
     --dropbox-root   Local Dropbox root path (default: ~/Dropbox)
     --list           Just list archive files and their sizes without downloading
     --workers N      Number of parallel workers (default: 1 = sequential)
+
+Directories are recursed automatically — specifying a directory finds all
+.tgz, .gz, and .zip files within it and all subdirectories.
 """
 
 import argparse
@@ -175,11 +178,28 @@ def local_to_dropbox_path(local_path: Path, dropbox_root: Path) -> str:
     return "/" + str(relative).replace(os.sep, "/")
 
 
+_ARCHIVE_SUFFIXES = {".tgz", ".gz", ".zip"}
+
+
 def resolve_paths(patterns: list[str]) -> list[Path]:
-    """Expand wildcards and resolve to absolute paths, deduplicating."""
+    """Expand wildcards and resolve to absolute paths, deduplicating.
+
+    If a pattern resolves to a directory, all archive files within it are
+    found recursively.
+    """
     seen = set()
     paths = []
     for pattern in patterns:
+        candidate = Path(os.path.expanduser(pattern)).resolve()
+        if candidate.is_dir():
+            matches = sorted(p for p in candidate.rglob("*") if p.is_file() and p.suffix.lower() in _ARCHIVE_SUFFIXES)
+            if not matches:
+                print(f"[WARN] No archives found in: {pattern}", file=sys.stderr)
+            for path in matches:
+                if path not in seen:
+                    seen.add(path)
+                    paths.append(path)
+            continue
         expanded = glob.glob(os.path.expanduser(pattern))
         if not expanded:
             print(f"[WARN] No files matched: {pattern}", file=sys.stderr)
@@ -192,7 +212,7 @@ def resolve_paths(patterns: list[str]) -> list[Path]:
             if not path.is_file():
                 print(f"[WARN] Not a file, skipping: {path}", file=sys.stderr)
                 continue
-            if path.suffix.lower() not in (".tgz", ".gz", ".zip"):
+            if path.suffix.lower() not in _ARCHIVE_SUFFIXES:
                 continue
             paths.append(path)
     return paths
