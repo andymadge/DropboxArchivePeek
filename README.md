@@ -50,6 +50,25 @@ python3 list_dropbox_archives.py ~/Dropbox/Takeout/*.tgz ~/Dropbox/Takeout/*.zip
 python3 list_dropbox_archives.py --dropbox-root ~/Documents/Dropbox *.tgz *.zip
 ```
 
+```bash
+pipenv run python3 list_dropbox_archives.py \
+  '~/Dropbox/Apps/Google Download Your Data/2025/2025-10/takeout-20251013T105805Z-001.tgz' \
+  '~/Dropbox/Apps/Google Download Your Data/2025/2025-12/takeout-20251213T110147Z-001.tgz' \
+  '~/Dropbox/Apps/Google Download Your Data/2025/2025-11/takeout-20231114T163220Z-001.zip' \
+  '~/Dropbox/Apps/Google Download Your Data/2025/2025-10/takeout-20251013T105805Z-2-001.tgz' \
+  '~/Dropbox/Apps/Google Download Your Data/2025/2025-10/takeout-20251013T105805Z-1-001.tgz' \
+  '~/Dropbox/Apps/Google Download Your Data/2025/2025-12/takeout-20251213T110147Z-3-001.tgz'
+
+# delete the created listing files
+rm \
+  ~'/Dropbox/Apps/Google Download Your Data/2025/2025-10/takeout-20251013T105805Z-001.txt' \
+  ~'/Dropbox/Apps/Google Download Your Data/2025/2025-12/takeout-20251213T110147Z-001.txt' \
+  ~'/Dropbox/Apps/Google Download Your Data/2025/2025-11/takeout-20231114T163220Z-001.txt' \
+  ~'/Dropbox/Apps/Google Download Your Data/2025/2025-10/takeout-20251013T105805Z-2-001.txt' \
+  ~'/Dropbox/Apps/Google Download Your Data/2025/2025-10/takeout-20251013T105805Z-1-001.txt' \
+  ~'/Dropbox/Apps/Google Download Your Data/2025/2025-12/takeout-20251213T110147Z-3-001.txt'
+```
+
 ## Output
 
 For each archive, a `.txt` file is written alongside it with the same base name:
