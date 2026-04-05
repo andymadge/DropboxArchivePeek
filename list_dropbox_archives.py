@@ -160,7 +160,7 @@ def resolve_paths(patterns: list[str]) -> list[Path]:
     seen = set()
     paths = []
     for pattern in patterns:
-        expanded = glob.glob(pattern)
+        expanded = glob.glob(os.path.expanduser(pattern))
         if not expanded:
             print(f"[WARN] No files matched: {pattern}", file=sys.stderr)
             continue
