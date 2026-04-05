@@ -17,9 +17,24 @@ import glob
 import os
 import sys
 import tarfile
+import time
 from pathlib import Path
 
 import requests
+from tqdm import tqdm
+
+
+def get_file_metadata(token: str, dropbox_path: str) -> dict:
+    resp = requests.post(
+        "https://api.dropboxapi.com/2/files/get_metadata",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        json={"path": dropbox_path},
+    )
+    resp.raise_for_status()
+    return resp.json()
 
 
 def get_temporary_link(token: str, dropbox_path: str) -> str:
@@ -35,12 +50,43 @@ def get_temporary_link(token: str, dropbox_path: str) -> str:
     return resp.json()["link"]
 
 
-def list_archive_contents(url: str) -> list[str]:
+class _ProgressStream:
+    """Wraps a urllib3 response stream to update a tqdm bar as bytes are read."""
+
+    def __init__(self, raw, bar: tqdm):
+        self._raw = raw
+        self._bar = bar
+
+    def read(self, amt=None):
+        chunk = self._raw.read(amt)
+        if chunk:
+            self._bar.update(len(chunk))
+        return chunk
+
+    # tarfile also calls readable() / seekable() on some paths
+    def readable(self):
+        return True
+
+    def seekable(self):
+        return False
+
+
+def list_archive_contents(url: str, file_size: int | None, label: str) -> list[str]:
     with requests.get(url, stream=True) as r:
         r.raise_for_status()
         r.raw.decode_content = True
-        with tarfile.open(fileobj=r.raw, mode="r|gz") as tar:
-            return [member.name for member in tar]
+        with tqdm(
+            total=file_size,
+            unit="B",
+            unit_scale=True,
+            unit_divisor=1024,
+            desc=label,
+            leave=False,
+            dynamic_ncols=True,
+        ) as bar:
+            stream = _ProgressStream(r.raw, bar)
+            with tarfile.open(fileobj=stream, mode="r|gz") as tar:
+                return [member.name for member in tar]
 
 
 def local_to_dropbox_path(local_path: Path, dropbox_root: Path) -> str:
@@ -67,6 +113,13 @@ def resolve_paths(patterns: list[str]) -> list[Path]:
                 continue
             paths.append(path)
     return paths
+
+
+def _fmt_duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    m, s = divmod(int(seconds), 60)
+    return f"{m}m{s:02d}s"
 
 
 def main():
@@ -99,6 +152,8 @@ def main():
 
     print(f"Processing {len(tgz_files)} archive(s)\n")
 
+    total_start = time.perf_counter()
+
     for tgz_path in tgz_files:
         output_path = tgz_path.parent / (tgz_path.stem + ".txt")
 
@@ -112,22 +167,41 @@ def main():
             print(f"[FAIL] {tgz_path} — not under Dropbox root ({dropbox_root})")
             continue
 
-        print(f"[....] {tgz_path.name}", end="", flush=True)
+        file_start = time.perf_counter()
+
+        try:
+            metadata = get_file_metadata(token, dropbox_path)
+            file_size = metadata.get("size")  # bytes, may be absent for placeholders
+        except requests.HTTPError:
+            file_size = None
 
         try:
             link = get_temporary_link(token, dropbox_path)
-            contents = list_archive_contents(link)
+            contents = list_archive_contents(link, file_size, tgz_path.name)
             output_path.write_text("\n".join(contents) + "\n")
-            print(f"\r[ OK ] {tgz_path.name} — {len(contents)} entries → {output_path}")
+            elapsed = time.perf_counter() - file_start
+            size_str = f"{file_size / 1_048_576:.1f} MB" if file_size else "? MB"
+            print(
+                f"[ OK ] {tgz_path.name} — {len(contents)} entries"
+                f" | {size_str} | {_fmt_duration(elapsed)}"
+                f" → {output_path}"
+            )
 
         except requests.HTTPError as e:
+            elapsed = time.perf_counter() - file_start
             print(
-                f"\r[FAIL] {tgz_path.name} — HTTP {e.response.status_code}: {e.response.text}"
+                f"[FAIL] {tgz_path.name} — HTTP {e.response.status_code}: {e.response.text}"
+                f" ({_fmt_duration(elapsed)})"
             )
         except tarfile.TarError as e:
-            print(f"\r[FAIL] {tgz_path.name} — tar error: {e}")
+            elapsed = time.perf_counter() - file_start
+            print(f"[FAIL] {tgz_path.name} — tar error: {e} ({_fmt_duration(elapsed)})")
         except Exception as e:
-            print(f"\r[FAIL] {tgz_path.name} — {e}")
+            elapsed = time.perf_counter() - file_start
+            print(f"[FAIL] {tgz_path.name} — {e} ({_fmt_duration(elapsed)})")
+
+    total_elapsed = time.perf_counter() - total_start
+    print(f"\nDone in {_fmt_duration(total_elapsed)}")
 
 
 if __name__ == "__main__":
