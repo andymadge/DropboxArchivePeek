@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import requests
+import urllib3.exceptions
 from rich.console import Console
 from rich.progress import (
     BarColumn,
@@ -259,6 +260,10 @@ _RETRYABLE_ERRORS = (
     requests.exceptions.ChunkedEncodingError,
     requests.exceptions.ConnectionError,
     requests.exceptions.ReadTimeout,
+    # urllib3 errors raised when reading response.raw directly (bypass requests wrapping)
+    urllib3.exceptions.ProtocolError,
+    urllib3.exceptions.ReadTimeoutError,
+    urllib3.exceptions.IncompleteRead,
 )
 _MAX_RETRIES = 50
 
@@ -297,16 +302,17 @@ def list_archive_contents(
                 )
                 progress.console.print(msg, markup=False)
                 _logger.info(msg)
-        stream = ResumableGzipStream(
-            url,
-            checkpoint=last_checkpoint,
-            progress=progress,
-            task_id=task_id,
-            # Only advance the aggregate task on the first attempt to
-            # avoid double-counting retried bytes.
-            agg_task_id=agg_task_id if attempt == 0 else None,
-        )
+        stream = None
         try:
+            stream = ResumableGzipStream(
+                url,
+                checkpoint=last_checkpoint,
+                progress=progress,
+                task_id=task_id,
+                # Only advance the aggregate task on the first attempt to
+                # avoid double-counting retried bytes.
+                agg_task_id=agg_task_id if attempt == 0 else None,
+            )
             # mode="r|" — raw uncompressed streaming tar; gzip is handled by ResumableGzipStream
             with tarfile.open(fileobj=stream, mode="r|") as tar:
                 for i, member in enumerate(tar):
@@ -319,8 +325,9 @@ def list_archive_contents(
             stream.flush_progress()
             return collected
         except _RETRYABLE_ERRORS as exc:
-            stream.flush_progress()
-            bytes_str = f"{stream._http_pos / 1024 ** 3:.1f} GB" if stream._http_pos else "0 bytes"
+            if stream is not None:
+                stream.flush_progress()
+            bytes_str = f"{stream._http_pos / 1024 ** 3:.1f} GB" if stream and stream._http_pos else "0 bytes"
             _logger.info(
                 f"[ERROR] {label} — {type(exc).__name__}: {exc}"
                 f" (attempt {attempt}/{max_retries}, downloaded {bytes_str},"
