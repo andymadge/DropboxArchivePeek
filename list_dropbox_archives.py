@@ -260,7 +260,7 @@ _RETRYABLE_ERRORS = (
     requests.exceptions.ConnectionError,
     requests.exceptions.ReadTimeout,
 )
-_MAX_RETRIES = 10
+_MAX_RETRIES = 50
 
 
 def list_archive_contents(
@@ -270,17 +270,18 @@ def list_archive_contents(
     progress: Progress | None = None,
     task_id: TaskID | None = None,
     agg_task_id: TaskID | None = None,
+    max_retries: int = _MAX_RETRIES,
 ) -> list[str]:
     """Stream a TGZ archive and return all entry names.
 
-    On connection failure, retries up to _MAX_RETRIES times. Each retry
+    On connection failure, retries up to max_retries times. Each retry
     resumes from the last saved checkpoint (HTTP Range request + restored
     decompressor state) rather than re-downloading from byte 0.
     """
     collected: list[str] = []
     last_checkpoint: _GzipCheckpoint | None = None
 
-    for attempt in range(_MAX_RETRIES + 1):
+    for attempt in range(max_retries + 1):
         skip = len(collected)
         if attempt > 0:
             if progress is not None and task_id is not None:
@@ -292,7 +293,7 @@ def list_archive_contents(
                     resume_str = "restarting from beginning"
                 msg = (
                     f"[RETRY] {label} — connection dropped after {skip} entries,"
-                    f" {resume_str} (attempt {attempt}/{_MAX_RETRIES})..."
+                    f" {resume_str} (attempt {attempt}/{max_retries})..."
                 )
                 progress.console.print(msg, markup=False)
                 _logger.info(msg)
@@ -317,9 +318,15 @@ def list_archive_contents(
                         collected.append(member.name)
             stream.flush_progress()
             return collected
-        except _RETRYABLE_ERRORS:
+        except _RETRYABLE_ERRORS as exc:
             stream.flush_progress()
-            if attempt >= _MAX_RETRIES:
+            bytes_str = f"{stream._http_pos / 1024 ** 3:.1f} GB" if stream._http_pos else "0 bytes"
+            _logger.info(
+                f"[ERROR] {label} — {type(exc).__name__}: {exc}"
+                f" (attempt {attempt}/{max_retries}, downloaded {bytes_str},"
+                f" {len(collected)} entries so far)"
+            )
+            if attempt >= max_retries:
                 raise
 
 
@@ -395,6 +402,7 @@ def process_one(
     agg_lock: threading.Lock,
     stop_new: threading.Event,
     sort: bool = True,
+    max_retries: int = _MAX_RETRIES,
 ) -> None:
     if stop_new.is_set():
         return
@@ -446,7 +454,7 @@ def process_one(
         if archive_path.suffix.lower() == ".zip":
             contents = list_zip_contents(link)
         else:
-            contents = list_archive_contents(link, file_size, label, progress, task_id, agg_task_id)
+            contents = list_archive_contents(link, file_size, label, progress, task_id, agg_task_id, max_retries)
 
         output_path.write_text("\n".join(sorted(contents) if sort else contents) + "\n")
         elapsed = time.perf_counter() - file_start
@@ -526,6 +534,13 @@ def main():
         help="Write archive entries in original order instead of sorted",
     )
     parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=_MAX_RETRIES,
+        metavar="N",
+        help=f"Max retries per archive on connection failure (default: {_MAX_RETRIES})",
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=f"%(prog)s {__version__}",
@@ -597,7 +612,7 @@ def main():
         stop_new = threading.Event()
         with ThreadPoolExecutor(max_workers=args.workers) as executor:
             for archive_path, display_root in archive_files:
-                fut = executor.submit(process_one, archive_path, display_root, dropbox_root, token, progress, agg_task_id, agg_lock, stop_new, not args.no_sort)
+                fut = executor.submit(process_one, archive_path, display_root, dropbox_root, token, progress, agg_task_id, agg_lock, stop_new, not args.no_sort, args.max_retries)
                 futures[fut] = archive_path
 
             try:
