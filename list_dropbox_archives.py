@@ -547,10 +547,13 @@ def main():
     if args.list:
         for archive_path, display_root in archive_files:
             label = str(archive_path.relative_to(display_root))
+            raw_name = archive_path.name
+            stem = raw_name[: -len(".tar.gz")] if raw_name.endswith(".tar.gz") else archive_path.stem
+            indexed = "[yes]" if (archive_path.parent / (stem + ".txt")).exists() else "[ no]"
             try:
                 dropbox_path = local_to_dropbox_path(archive_path, dropbox_root)
             except ValueError:
-                print(f"{'ERR':>8}  {label}")
+                print(f"{'ERR':>8}  {indexed}  {label}")
                 continue
             try:
                 metadata = get_file_metadata(token, dropbox_path)
@@ -564,7 +567,7 @@ def main():
                     size_str = "?"
             except requests.HTTPError as e:
                 size_str = f"HTTP {e.response.status_code}"
-            print(f"{size_str:>8}  {label}")
+            print(f"{size_str:>8}  {indexed}  {label}")
         sys.exit(0)
 
     log_path = Path(f"dropbox_lister_{datetime.now():%Y%m%d_%H%M%S}.log")
