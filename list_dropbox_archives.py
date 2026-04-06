@@ -204,6 +204,16 @@ class ResumableGzipStream:
         # 60 s, turning a silently stalled connection into a retryable error.
         self._response = requests.get(self._url, stream=True, headers=headers, timeout=(30, 60))
         self._response.raise_for_status()
+        # If we requested a Range but the server returned 200 (full file) instead
+        # of 206 (partial), the bytes will start from offset 0 — feeding them to
+        # a mid-stream decompressor produces garbage.  Treat this as a retryable
+        # error so the caller can fall back to an earlier checkpoint or restart.
+        if self._http_pos > 0 and self._response.status_code != 206:
+            raise _RangeNotSupported(
+                f"Range request not honoured (got {self._response.status_code},"
+                f" expected 206) — server returned full file instead of resuming"
+                f" from byte {self._http_pos}"
+            )
         self._raw = self._response.raw
 
     def maybe_checkpoint(self, member: tarfile.TarInfo, absolute_i: int) -> None:
@@ -297,6 +307,10 @@ class ResumableGzipStream:
         return False
 
 
+class _RangeNotSupported(Exception):
+    """Raised when a Range resume request is not honoured by the server."""
+
+
 _RETRYABLE_ERRORS = (
     requests.exceptions.ChunkedEncodingError,
     requests.exceptions.ConnectionError,
@@ -305,6 +319,7 @@ _RETRYABLE_ERRORS = (
     urllib3.exceptions.ProtocolError,
     urllib3.exceptions.ReadTimeoutError,
     urllib3.exceptions.IncompleteRead,
+    _RangeNotSupported,
 )
 _MAX_RETRIES = 50
 
@@ -367,6 +382,22 @@ def list_archive_contents(
                         last_checkpoint = cp
             stream.flush_progress()
             return collected
+        except (tarfile.TarError, zlib.error) as exc:
+            # Tar/zlib error after a checkpoint resume means the restored
+            # stream didn't land at a valid header boundary.  Discard the
+            # checkpoint and retry from scratch instead of failing outright.
+            if last_checkpoint is not None and attempt < max_retries:
+                if stream is not None:
+                    stream.flush_progress()
+                _logger.info(
+                    f"[ERROR] {label} — {type(exc).__name__}: {exc}"
+                    f" (attempt {attempt}/{max_retries}, checkpoint resume"
+                    f" produced bad data — will restart from beginning)"
+                )
+                last_checkpoint = None
+                collected.clear()
+                continue
+            raise
         except _RETRYABLE_ERRORS as exc:
             if stream is not None:
                 stream.flush_progress()
@@ -376,6 +407,11 @@ def list_archive_contents(
                 f" (attempt {attempt}/{max_retries}, downloaded {bytes_str},"
                 f" {len(collected)} entries so far)"
             )
+            if isinstance(exc, _RangeNotSupported):
+                # Server won't honour Range — checkpoint is useless, restart
+                # from the beginning on the next attempt.
+                last_checkpoint = None
+                collected.clear()
             if attempt >= max_retries:
                 raise
 
