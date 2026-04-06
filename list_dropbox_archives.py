@@ -573,6 +573,7 @@ def main():
                             + (f"\n{n} pending archive(s) cancelled" if n else ""),
                             markup=False,
                         )
+                        break
             except KeyboardInterrupt:
                 cancelled = sum(1 for f in futures if f.cancel())
                 in_progress = sum(1 for f in futures if not f.done() and not f.cancelled())
