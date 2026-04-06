@@ -25,6 +25,7 @@ Directories are recursed automatically — specifying a directory finds all
 
 import argparse
 import glob
+import logging
 import os
 import sys
 import tarfile
@@ -33,6 +34,7 @@ import time
 import zipfile
 import zlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 from typing import NamedTuple
 
@@ -50,6 +52,7 @@ from rich.progress import (
 from rich.table import Column
 
 _console = Console()
+_logger = logging.getLogger(__name__)
 
 
 class _GzipCheckpoint(NamedTuple):
@@ -285,11 +288,12 @@ def list_archive_contents(
                     resume_str = f"resuming from {last_checkpoint.http_pos / 1024 ** 3:.1f} GB"
                 else:
                     resume_str = "restarting from beginning"
-                progress.console.print(
+                msg = (
                     f"[RETRY] {label} — connection dropped after {skip} entries,"
-                    f" {resume_str} (attempt {attempt}/{_MAX_RETRIES})...",
-                    markup=False,
+                    f" {resume_str} (attempt {attempt}/{_MAX_RETRIES})..."
                 )
+                progress.console.print(msg, markup=False)
+                _logger.info(msg)
         stream = ResumableGzipStream(
             url,
             checkpoint=last_checkpoint,
@@ -400,13 +404,17 @@ def process_one(
     output_label = str(output_path.relative_to(display_root))
 
     if output_path.exists():
-        progress.console.print(f"[SKIP] {label} — listing already exists ({output_label})", markup=False)
+        msg = f"[SKIP] {label} — listing already exists ({output_label})"
+        progress.console.print(msg, markup=False)
+        _logger.info(msg)
         return
 
     try:
         dropbox_path = local_to_dropbox_path(archive_path, dropbox_root)
     except ValueError:
-        progress.console.print(f"[FAIL] {label} — not under Dropbox root ({dropbox_root})", markup=False)
+        msg = f"[FAIL] {label} — not under Dropbox root ({dropbox_root})"
+        progress.console.print(msg, markup=False)
+        _logger.info(msg)
         return
 
     file_start = time.perf_counter()
@@ -417,7 +425,9 @@ def process_one(
     except requests.HTTPError as e:
         if e.response.status_code == 401:
             stop_new.set()
-            progress.console.print(f"[FAIL] {label} — HTTP 401: {e.response.text}", markup=False)
+            msg = f"[FAIL] {label} — HTTP 401: {e.response.text}"
+            progress.console.print(msg, markup=False)
+            _logger.info(msg)
             return
         file_size = None
 
@@ -439,34 +449,44 @@ def process_one(
         output_path.write_text("\n".join(sorted(contents) if sort else contents) + "\n")
         elapsed = time.perf_counter() - file_start
         size_str = f"{file_size / 1_048_576:,.1f} MB" if file_size else "? MB"
-        progress.console.print(
+        msg = (
             f"[ OK ] {label} — {len(contents)} entries"
             f" | {size_str} | {_fmt_duration(elapsed)}"
-            f" → {output_label}",
-            markup=False,
+            f" → {output_label}"
         )
+        progress.console.print(msg, markup=False)
+        _logger.info(msg)
 
     except requests.HTTPError as e:
         elapsed = time.perf_counter() - file_start
         if e.response.status_code == 401:
             stop_new.set()
-        progress.console.print(
+        msg = (
             f"[FAIL] {label} — HTTP {e.response.status_code}: {e.response.text}"
-            f" ({_fmt_duration(elapsed)})",
-            markup=False,
+            f" ({_fmt_duration(elapsed)})"
         )
+        progress.console.print(msg, markup=False)
+        _logger.info(msg)
     except tarfile.TarError as e:
         elapsed = time.perf_counter() - file_start
-        progress.console.print(f"[FAIL] {label} — tar error: {e} ({_fmt_duration(elapsed)})", markup=False)
+        msg = f"[FAIL] {label} — tar error: {e} ({_fmt_duration(elapsed)})"
+        progress.console.print(msg, markup=False)
+        _logger.info(msg)
     except zipfile.BadZipFile as e:
         elapsed = time.perf_counter() - file_start
-        progress.console.print(f"[FAIL] {label} — bad zip: {e} ({_fmt_duration(elapsed)})", markup=False)
+        msg = f"[FAIL] {label} — bad zip: {e} ({_fmt_duration(elapsed)})"
+        progress.console.print(msg, markup=False)
+        _logger.info(msg)
     except ValueError as e:
         elapsed = time.perf_counter() - file_start
-        progress.console.print(f"[FAIL] {label} — {e} ({_fmt_duration(elapsed)})", markup=False)
+        msg = f"[FAIL] {label} — {e} ({_fmt_duration(elapsed)})"
+        progress.console.print(msg, markup=False)
+        _logger.info(msg)
     except Exception as e:
         elapsed = time.perf_counter() - file_start
-        progress.console.print(f"[FAIL] {label} — {e} ({_fmt_duration(elapsed)})", markup=False)
+        msg = f"[FAIL] {label} — {e} ({_fmt_duration(elapsed)})"
+        progress.console.print(msg, markup=False)
+        _logger.info(msg)
     finally:
         if task_id is not None:
             progress.remove_task(task_id)
@@ -540,7 +560,15 @@ def main():
             print(f"{size_str:>8}  {label}")
         sys.exit(0)
 
+    log_path = Path(f"dropbox_lister_{datetime.now():%Y%m%d_%H%M%S}.log")
+    _fh = logging.FileHandler(log_path)
+    _fh.setFormatter(logging.Formatter("%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+    _logger.addHandler(_fh)
+    _logger.setLevel(logging.INFO)
+
     print(f"Processing {len(archive_files)} archive(s) with {args.workers} worker(s)\n")
+    print(f"Logging to {log_path}\n")
+    _logger.info(f"START: processing {len(archive_files)} archive(s) with {args.workers} worker(s)")
 
     total_start = time.perf_counter()
 
@@ -572,6 +600,10 @@ def main():
                             "Generate a new one at: https://www.dropbox.com/developers/apps"
                             + (f"\n{n} pending archive(s) cancelled" if n else ""),
                             markup=False,
+                        )
+                        _logger.info(
+                            "The temporary 4-hour access token has expired."
+                            + (f" {n} pending archive(s) cancelled" if n else "")
                         )
                         break
             except KeyboardInterrupt:
@@ -625,6 +657,7 @@ def main():
 
     total_elapsed = time.perf_counter() - total_start
     print(f"\nDone in {_fmt_duration(total_elapsed)}")
+    _logger.info(f"DONE in {_fmt_duration(total_elapsed)}")
 
 
 if __name__ == "__main__":
