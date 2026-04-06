@@ -51,6 +51,8 @@ from rich.progress import (
 )
 from rich.table import Column
 
+__version__ = "1.0.0"
+
 _console = Console()
 _logger = logging.getLogger(__name__)
 
@@ -522,6 +524,11 @@ def main():
         "--no-sort",
         action="store_true",
         help="Write archive entries in original order instead of sorted",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
     )
     args = parser.parse_args()
 
