@@ -60,8 +60,9 @@ _logger = logging.getLogger(__name__)
 
 class _GzipCheckpoint(NamedTuple):
     """Saved decompressor state at a known compressed byte offset."""
-    http_pos: int    # byte offset in the compressed HTTP stream
+    http_pos: int        # byte offset in the compressed HTTP stream
     decompressor: object  # zlib.decompressobj copy
+    buf: bytes           # decompressed bytes not yet consumed by tarfile
 
 
 def get_file_metadata(token: str, dropbox_path: str) -> dict:
@@ -175,10 +176,12 @@ class ResumableGzipStream:
         self._bytes_since_checkpoint = 0
         self._checkpoint_http_pos = 0
         self._checkpoint_decompressor: object | None = None
+        self._checkpoint_buf = b""
 
         if checkpoint:
             self._http_pos = checkpoint.http_pos
             self._decompressor = checkpoint.decompressor.copy()
+            self._buf = checkpoint.buf
         else:
             # MAX_WBITS | 16 tells zlib to expect and strip the gzip header
             self._decompressor = zlib.decompressobj(zlib.MAX_WBITS | 16)
@@ -200,22 +203,22 @@ class ResumableGzipStream:
     def maybe_checkpoint(self) -> None:
         """Conditionally save a checkpoint at a tar entry boundary.
 
-        Checkpoints are only saved when the internal buffer is empty, which
-        guarantees that self._http_pos and the decompressor state correspond
-        exactly to the bytes tarfile has already consumed. Restoring a
-        checkpoint is then always safe regardless of where in the tar stream
-        the caller is.
+        Saves http_pos, decompressor state, and the unconsumed buffer so that
+        resumption can replay buffered bytes before issuing the next HTTP read.
+        This correctly handles the common case where _buf is non-empty at entry
+        boundaries (tarfile reads 512 B at a time; we decompress 64 KB at a time).
         """
-        if self._bytes_since_checkpoint >= self._CHECKPOINT_INTERVAL and not self._buf:
+        if self._bytes_since_checkpoint >= self._CHECKPOINT_INTERVAL:
             self._checkpoint_http_pos = self._http_pos
             self._checkpoint_decompressor = self._decompressor.copy()
+            self._checkpoint_buf = bytes(self._buf)
             self._bytes_since_checkpoint = 0
 
     @property
     def checkpoint(self) -> _GzipCheckpoint | None:
         if self._checkpoint_decompressor is None:
             return None
-        return _GzipCheckpoint(self._checkpoint_http_pos, self._checkpoint_decompressor)
+        return _GzipCheckpoint(self._checkpoint_http_pos, self._checkpoint_decompressor, self._checkpoint_buf)
 
     def read(self, n: int = -1) -> bytes:
         target = n if n >= 0 else float("inf")
