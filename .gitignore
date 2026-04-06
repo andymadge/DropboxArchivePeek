@@ -1,2 +1,4 @@
 .claude/worktrees/
 dropbox_lister_*.log
+__pycache__/
+.DS_Store
