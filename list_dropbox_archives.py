@@ -60,9 +60,11 @@ _logger = logging.getLogger(__name__)
 
 class _GzipCheckpoint(NamedTuple):
     """Saved decompressor state at a known compressed byte offset."""
-    http_pos: int        # byte offset in the compressed HTTP stream
+    http_pos: int         # byte offset in the compressed HTTP stream
     decompressor: object  # zlib.decompressobj copy
-    buf: bytes           # decompressed bytes not yet consumed by tarfile
+    buf: bytes            # decompressed bytes not yet consumed by tarfile at save time
+    bytes_to_skip: int    # bytes to discard from buf+stream on restore to reach next header
+    entries_before: int   # tar entries preceding the stream position after skipping
 
 
 def get_file_metadata(token: str, dropbox_path: str) -> dict:
@@ -177,12 +179,16 @@ class ResumableGzipStream:
         self._checkpoint_http_pos = 0
         self._checkpoint_decompressor: object | None = None
         self._checkpoint_buf = b""
+        self._checkpoint_bytes_to_skip = 0
+        self._checkpoint_entries_before = 0
 
         if checkpoint:
             self._http_pos = checkpoint.http_pos
             self._decompressor = checkpoint.decompressor.copy()
             self._buf = checkpoint.buf
+            self._skip_bytes = checkpoint.bytes_to_skip
         else:
+            self._skip_bytes = 0
             # MAX_WBITS | 16 tells zlib to expect and strip the gzip header
             self._decompressor = zlib.decompressobj(zlib.MAX_WBITS | 16)
 
@@ -200,27 +206,59 @@ class ResumableGzipStream:
         self._response.raise_for_status()
         self._raw = self._response.raw
 
-    def maybe_checkpoint(self) -> None:
-        """Conditionally save a checkpoint at a tar entry boundary.
+    def maybe_checkpoint(self, member: tarfile.TarInfo, absolute_i: int) -> None:
+        """Conditionally save a checkpoint after collecting a tar entry.
 
-        Saves http_pos, decompressor state, and the unconsumed buffer so that
-        resumption can replay buffered bytes before issuing the next HTTP read.
-        This correctly handles the common case where _buf is non-empty at entry
-        boundaries (tarfile reads 512 B at a time; we decompress 64 KB at a time).
+        At the call site, tarfile has read member's header and _buf starts with
+        member's file data. bytes_to_skip captures how many decompressed bytes
+        must be discarded on restore so that a fresh tarfile starts reading at
+        the next entry's header rather than mid-data.
+        entries_before records how many entries precede the restored stream
+        position so the collection skip-logic stays correct across retries.
         """
         if self._bytes_since_checkpoint >= self._CHECKPOINT_INTERVAL:
+            # bytes of data+padding tarfile will consume before the next header
+            self._checkpoint_bytes_to_skip = ((member.size + 511) // 512) * 512
             self._checkpoint_http_pos = self._http_pos
             self._checkpoint_decompressor = self._decompressor.copy()
             self._checkpoint_buf = bytes(self._buf)
+            self._checkpoint_entries_before = absolute_i + 1
             self._bytes_since_checkpoint = 0
 
     @property
     def checkpoint(self) -> _GzipCheckpoint | None:
         if self._checkpoint_decompressor is None:
             return None
-        return _GzipCheckpoint(self._checkpoint_http_pos, self._checkpoint_decompressor, self._checkpoint_buf)
+        return _GzipCheckpoint(
+            self._checkpoint_http_pos,
+            self._checkpoint_decompressor,
+            self._checkpoint_buf,
+            self._checkpoint_bytes_to_skip,
+            self._checkpoint_entries_before,
+        )
 
     def read(self, n: int = -1) -> bytes:
+        # On checkpoint restore, skip the saved entry's data+padding so that
+        # a fresh tarfile starts reading from the next entry's header.
+        while self._skip_bytes > 0:
+            from_buf = min(self._skip_bytes, len(self._buf))
+            if from_buf:
+                self._buf = self._buf[from_buf:]
+                self._skip_bytes -= from_buf
+            if self._skip_bytes > 0:
+                compressed = self._raw.read(65536)
+                if not compressed:
+                    self._skip_bytes = 0
+                    break
+                self._http_pos += len(compressed)
+                self._pending += len(compressed)
+                self._pending_agg += len(compressed)
+                now = time.monotonic()
+                if now - self._last_flush >= self._FLUSH_INTERVAL:
+                    self._do_flush()
+                    self._last_flush = now
+                self._buf += self._decompressor.decompress(compressed)
+
         target = n if n >= 0 else float("inf")
         while len(self._buf) < target:
             compressed = self._raw.read(65536)
@@ -316,15 +354,17 @@ def list_archive_contents(
                 # avoid double-counting retried bytes.
                 agg_task_id=agg_task_id if attempt == 0 else None,
             )
+            entries_before = last_checkpoint.entries_before if last_checkpoint else 0
             # mode="r|" — raw uncompressed streaming tar; gzip is handled by ResumableGzipStream
             with tarfile.open(fileobj=stream, mode="r|") as tar:
                 for i, member in enumerate(tar):
-                    stream.maybe_checkpoint()
+                    abs_i = i + entries_before
+                    if abs_i >= skip:
+                        collected.append(member.name)
+                    stream.maybe_checkpoint(member, abs_i)
                     cp = stream.checkpoint
                     if cp is not None:
                         last_checkpoint = cp
-                    if i >= skip:
-                        collected.append(member.name)
             stream.flush_progress()
             return collected
         except _RETRYABLE_ERRORS as exc:
