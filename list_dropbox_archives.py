@@ -259,6 +259,7 @@ def process_one(
     agg_task_id: TaskID,
     agg_lock: threading.Lock,
     stop_new: threading.Event,
+    sort: bool = True,
 ) -> None:
     if stop_new.is_set():
         return
@@ -306,7 +307,7 @@ def process_one(
         else:
             contents = list_archive_contents(link, file_size, label, progress, task_id, agg_task_id)
 
-        output_path.write_text("\n".join(contents) + "\n")
+        output_path.write_text("\n".join(sorted(contents) if sort else contents) + "\n")
         elapsed = time.perf_counter() - file_start
         size_str = f"{file_size / 1_048_576:,.1f} MB" if file_size else "? MB"
         progress.console.print(
@@ -368,6 +369,11 @@ def main():
         metavar="N",
         help="Number of parallel workers (default: 1 = sequential)",
     )
+    parser.add_argument(
+        "--no-sort",
+        action="store_true",
+        help="Write archive entries in original order instead of sorted",
+    )
     args = parser.parse_args()
 
     token = os.environ.get("DROPBOX_TOKEN")
@@ -424,7 +430,7 @@ def main():
         stop_new = threading.Event()
         with ThreadPoolExecutor(max_workers=args.workers) as executor:
             for archive_path, display_root in archive_files:
-                fut = executor.submit(process_one, archive_path, display_root, dropbox_root, token, progress, agg_task_id, agg_lock, stop_new)
+                fut = executor.submit(process_one, archive_path, display_root, dropbox_root, token, progress, agg_task_id, agg_lock, stop_new, not args.no_sort)
                 futures[fut] = archive_path
 
             try:
