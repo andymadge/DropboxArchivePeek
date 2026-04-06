@@ -31,8 +31,10 @@ import tarfile
 import threading
 import time
 import zipfile
+import zlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import NamedTuple
 
 import requests
 from rich.console import Console
@@ -48,6 +50,12 @@ from rich.progress import (
 from rich.table import Column
 
 _console = Console()
+
+
+class _GzipCheckpoint(NamedTuple):
+    """Saved decompressor state at a known compressed byte offset."""
+    http_pos: int    # byte offset in the compressed HTTP stream
+    decompressor: object  # zlib.decompressobj copy
 
 
 def get_file_metadata(token: str, dropbox_path: str) -> dict:
@@ -125,47 +133,126 @@ def get_temporary_link(token: str, dropbox_path: str) -> str:
     return resp.json()["link"]
 
 
-class _ProgressStream:
-    """Wraps a urllib3 response stream to advance a rich progress task as bytes are read.
+class ResumableGzipStream:
+    """HTTP-backed gzip stream with checkpoint-based resumption.
 
-    Advances are batched and flushed every _FLUSH_INTERVAL seconds so rich's
-    speed-estimate window covers the intended 30-second period. Without
-    batching, high-throughput streams saturate the 1000-sample deque in
-    seconds, shrinking the effective window and making the rate display noisy.
+    Decompresses gzip data using zlib directly so the decompressor state can
+    be saved (via zlib.decompressobj.copy()) at tar entry boundaries. On
+    connection failure, a new HTTP Range request picks up from the saved byte
+    offset and the restored decompressor continues seamlessly — avoiding a
+    full re-download from byte 0.
+
+    Progress advances are batched and flushed every 0.25 s so Rich's
+    speed-estimate window covers a meaningful period.
     """
 
-    _FLUSH_INTERVAL = 0.25  # seconds between progress.advance() calls
+    _CHECKPOINT_INTERVAL = 256 * 1024 * 1024  # save checkpoint every 256 MB compressed
+    _FLUSH_INTERVAL = 0.25
 
-    def __init__(self, raw, progress: Progress, task_id: TaskID, agg_task_id: TaskID | None = None) -> None:
-        self._raw = raw
+    def __init__(
+        self,
+        url: str,
+        checkpoint: _GzipCheckpoint | None = None,
+        progress: Progress | None = None,
+        task_id: TaskID | None = None,
+        agg_task_id: TaskID | None = None,
+    ) -> None:
+        self._url = url
         self._progress = progress
         self._task_id = task_id
         self._agg_task_id = agg_task_id
+        self._http_pos = 0
+        self._buf = b""
         self._pending = 0
         self._pending_agg = 0
         self._last_flush = time.monotonic()
+        self._bytes_since_checkpoint = 0
+        self._checkpoint_http_pos = 0
+        self._checkpoint_decompressor: object | None = None
 
-    def read(self, amt=None):
-        chunk = self._raw.read(amt)
-        n = len(chunk) if chunk else 0
-        self._pending += n
-        self._pending_agg += n
-        now = time.monotonic()
-        if not chunk or now - self._last_flush >= self._FLUSH_INTERVAL:
-            if self._pending:
-                self._progress.advance(self._task_id, self._pending)
-                self._pending = 0
-            if self._agg_task_id is not None and self._pending_agg:
-                self._progress.advance(self._agg_task_id, self._pending_agg)
-                self._pending_agg = 0
-            self._last_flush = now
-        return chunk
+        if checkpoint:
+            self._http_pos = checkpoint.http_pos
+            self._decompressor = checkpoint.decompressor.copy()
+        else:
+            # MAX_WBITS | 16 tells zlib to expect and strip the gzip header
+            self._decompressor = zlib.decompressobj(zlib.MAX_WBITS | 16)
 
-    def readable(self):
+        self._response: requests.Response | None = None
+        self._raw = None
+        self._connect()
+
+    def _connect(self) -> None:
+        if self._response is not None:
+            self._response.close()
+        headers = {"Range": f"bytes={self._http_pos}-"} if self._http_pos > 0 else {}
+        self._response = requests.get(self._url, stream=True, headers=headers)
+        self._response.raise_for_status()
+        self._raw = self._response.raw
+
+    def maybe_checkpoint(self) -> None:
+        """Conditionally save a checkpoint at a tar entry boundary.
+
+        Checkpoints are only saved when the internal buffer is empty, which
+        guarantees that self._http_pos and the decompressor state correspond
+        exactly to the bytes tarfile has already consumed. Restoring a
+        checkpoint is then always safe regardless of where in the tar stream
+        the caller is.
+        """
+        if self._bytes_since_checkpoint >= self._CHECKPOINT_INTERVAL and not self._buf:
+            self._checkpoint_http_pos = self._http_pos
+            self._checkpoint_decompressor = self._decompressor.copy()
+            self._bytes_since_checkpoint = 0
+
+    @property
+    def checkpoint(self) -> _GzipCheckpoint | None:
+        if self._checkpoint_decompressor is None:
+            return None
+        return _GzipCheckpoint(self._checkpoint_http_pos, self._checkpoint_decompressor)
+
+    def read(self, n: int = -1) -> bytes:
+        target = n if n >= 0 else float("inf")
+        while len(self._buf) < target:
+            compressed = self._raw.read(65536)
+            if not compressed:
+                break
+            self._http_pos += len(compressed)
+            self._bytes_since_checkpoint += len(compressed)
+            self._pending += len(compressed)
+            self._pending_agg += len(compressed)
+            now = time.monotonic()
+            if now - self._last_flush >= self._FLUSH_INTERVAL:
+                self._do_flush()
+                self._last_flush = now
+            self._buf += self._decompressor.decompress(compressed)
+        if n < 0:
+            result, self._buf = self._buf, b""
+        else:
+            result, self._buf = self._buf[:n], self._buf[n:]
+        return result
+
+    def flush_progress(self) -> None:
+        self._do_flush()
+
+    def _do_flush(self) -> None:
+        if self._progress and self._task_id is not None and self._pending:
+            self._progress.advance(self._task_id, self._pending)
+            self._pending = 0
+        if self._progress and self._agg_task_id is not None and self._pending_agg:
+            self._progress.advance(self._agg_task_id, self._pending_agg)
+            self._pending_agg = 0
+
+    def readable(self) -> bool:
         return True
 
-    def seekable(self):
+    def seekable(self) -> bool:
         return False
+
+
+_RETRYABLE_ERRORS = (
+    requests.exceptions.ChunkedEncodingError,
+    requests.exceptions.ConnectionError,
+)
+_MAX_RETRIES = 10
 
 
 def list_archive_contents(
@@ -176,16 +263,55 @@ def list_archive_contents(
     task_id: TaskID | None = None,
     agg_task_id: TaskID | None = None,
 ) -> list[str]:
-    with requests.get(url, stream=True) as r:
-        r.raise_for_status()
-        r.raw.decode_content = True
-        if progress is not None and task_id is not None:
-            stream = _ProgressStream(r.raw, progress, task_id, agg_task_id)
-            with tarfile.open(fileobj=stream, mode="r|gz") as tar:
-                return [member.name for member in tar]
-        else:
-            with tarfile.open(fileobj=r.raw, mode="r|gz") as tar:
-                return [member.name for member in tar]
+    """Stream a TGZ archive and return all entry names.
+
+    On connection failure, retries up to _MAX_RETRIES times. Each retry
+    resumes from the last saved checkpoint (HTTP Range request + restored
+    decompressor state) rather than re-downloading from byte 0.
+    """
+    collected: list[str] = []
+    last_checkpoint: _GzipCheckpoint | None = None
+
+    for attempt in range(_MAX_RETRIES + 1):
+        skip = len(collected)
+        if attempt > 0:
+            if progress is not None and task_id is not None:
+                progress.reset(task_id, total=file_size)
+            if progress is not None:
+                if last_checkpoint:
+                    resume_str = f"resuming from {last_checkpoint.http_pos / 1024 ** 3:.1f} GB"
+                else:
+                    resume_str = "restarting from beginning"
+                progress.console.print(
+                    f"[RETRY] {label} — connection dropped after {skip} entries,"
+                    f" {resume_str} (attempt {attempt}/{_MAX_RETRIES})...",
+                    markup=False,
+                )
+        stream = ResumableGzipStream(
+            url,
+            checkpoint=last_checkpoint,
+            progress=progress,
+            task_id=task_id,
+            # Only advance the aggregate task on the first attempt to
+            # avoid double-counting retried bytes.
+            agg_task_id=agg_task_id if attempt == 0 else None,
+        )
+        try:
+            # mode="r|" — raw uncompressed streaming tar; gzip is handled by ResumableGzipStream
+            with tarfile.open(fileobj=stream, mode="r|") as tar:
+                for i, member in enumerate(tar):
+                    stream.maybe_checkpoint()
+                    cp = stream.checkpoint
+                    if cp is not None:
+                        last_checkpoint = cp
+                    if i >= skip:
+                        collected.append(member.name)
+            stream.flush_progress()
+            return collected
+        except _RETRYABLE_ERRORS:
+            stream.flush_progress()
+            if attempt >= _MAX_RETRIES:
+                raise
 
 
 def list_zip_contents(url: str) -> list[str]:
