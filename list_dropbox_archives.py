@@ -185,7 +185,9 @@ class ResumableGzipStream:
         if self._response is not None:
             self._response.close()
         headers = {"Range": f"bytes={self._http_pos}-"} if self._http_pos > 0 else {}
-        self._response = requests.get(self._url, stream=True, headers=headers)
+        # timeout=(connect_s, read_s): read timeout fires if no data arrives for
+        # 60 s, turning a silently stalled connection into a retryable error.
+        self._response = requests.get(self._url, stream=True, headers=headers, timeout=(30, 60))
         self._response.raise_for_status()
         self._raw = self._response.raw
 
@@ -251,6 +253,7 @@ class ResumableGzipStream:
 _RETRYABLE_ERRORS = (
     requests.exceptions.ChunkedEncodingError,
     requests.exceptions.ConnectionError,
+    requests.exceptions.ReadTimeout,
 )
 _MAX_RETRIES = 10
 
