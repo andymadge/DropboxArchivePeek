@@ -1,5 +1,7 @@
 # OAuth 2 Offline Access (Avoid 4-Hour Token Expiry)
 
+> **This is not yet implemented.** This document captures the design and required changes if we wanted to add support for long-lived OAuth tokens. The script would need to be modified as described below.
+
 The script currently requires a manually generated 4-hour access token from the Dropbox developer console. When it expires mid-run, all in-progress workers stop and pending archives are cancelled.
 
 Dropbox supports OAuth 2 **offline access**, which issues a long-lived refresh token alongside a short-lived access token. The refresh token never expires (unless revoked) and can be exchanged for a new access token automatically.
