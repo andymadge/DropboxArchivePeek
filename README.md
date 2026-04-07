@@ -15,8 +15,7 @@ While the Google Takeout case is the primary motivation, the tool works for any 
 
 ## Requirements
 
-- Python 3.12+
-- `pipenv`
+- Python 3.10+
 - A Dropbox API token with `files.content.read` permission
 
 ## Setup
@@ -33,14 +32,19 @@ While the Google Takeout case is the primary motivation, the tool works for any 
 
 On the app's **Settings** tab, scroll to **OAuth 2** and click **Generate** under "Generated access token". Copy the token — it expires after 4 hours.
 
-### 3. Install dependencies and activate the virtual environment
+### 3. Install dependencies
+
+A `Pipfile` is provided. With pipenv:
 
 ```bash
+# Create virtual environment and install dependencies from Pipfile
 pipenv install
 
 # Activate the virtual environment
 pipenv shell
 ```
+
+Or install `requests` and `rich` using your preferred tool.
 
 ### 4. Export your token
 
