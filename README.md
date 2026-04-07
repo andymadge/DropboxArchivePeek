@@ -33,10 +33,12 @@ While the Google Takeout case is the primary motivation, the tool works for any 
 
 On the app's **Settings** tab, scroll to **OAuth 2** and click **Generate** under "Generated access token". Copy the token — it expires after 4 hours.
 
-### 3. Install dependencies
+### 3. Install dependencies and activate the virtual environment
 
 ```bash
 pipenv install
+
+# Activate the virtual environment
 pipenv shell
 ```
 
@@ -56,12 +58,12 @@ python3 peek_dropbox_archives.py <file_or_pattern> [<file_or_pattern> ...]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--dropbox-root PATH` | `~/Dropbox` | Local Dropbox root directory |
-| `--workers N` | `1` | Number of parallel workers |
+| `--dropbox-root PATH` | `~/Dropbox` | Local Dropbox root directory. Omit if your Dropbix is at default location |
+| `--workers N` | `1` | Number of parallel workers. Dropbox download speed seems to be limited to 20-25 MB/s per file so downloading multiple files simultaneously can improve performance |
 | `--max-retries N` | `50` | Max retries per archive on connection failure |
-| `--no-sort` | — | Write entries in original order instead of sorted |
+| `--no-sort` | — | Write contents entries in original order instead of sorted |
 | `--no-summary` | — | Skip writing `_summary.txt` files |
-| `--list` | — | List archive files and sizes without processing |
+| `--list` | — | List archive files and sizes without downloading them |
 
 ### Examples
 
