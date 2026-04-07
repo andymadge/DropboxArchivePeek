@@ -372,7 +372,7 @@ def list_archive_contents(
             )
             entries_before = last_checkpoint.entries_before if last_checkpoint else 0
             # mode="r|" — raw uncompressed streaming tar; gzip is handled by ResumableGzipStream
-            with tarfile.open(fileobj=stream, mode="r|") as tar:
+            with tarfile.open(fileobj=stream, mode="r|", bufsize=tarfile.BLOCKSIZE) as tar:
                 for i, member in enumerate(tar):
                     abs_i = i + entries_before
                     if abs_i >= skip:
