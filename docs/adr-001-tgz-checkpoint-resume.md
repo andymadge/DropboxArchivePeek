@@ -54,6 +54,24 @@ Two cases trigger a full restart rather than a fail:
 
 2. **`TarError` or `zlib.error` after a checkpoint resume** — treated as a sign the restored stream didn't land at a valid header boundary. Checkpoint discarded, next attempt restarts from scratch. This is a safety net; in practice the `bytes_to_skip` approach prevents this.
 
+### urllib3 exceptions must be caught directly
+
+`ResumableGzipStream` reads from `response.raw` rather than the requests response object. At that level, urllib3 raises its own exceptions (`ProtocolError`, `ReadTimeoutError`, `IncompleteRead`) instead of the requests wrappers (`ChunkedEncodingError`, `ConnectionError`, etc.). These are different exception types and do not inherit from each other.
+
+If only requests exceptions are listed in `_RETRYABLE_ERRORS`, urllib3 errors escape the retry loop entirely and cause an immediate `[FAIL]` with no retries. Both sets must be listed explicitly.
+
+### Connection timeout strategy
+
+The streaming request uses `timeout=(30, 60)`:
+- **30s connect timeout** — fail fast if the CDN is unreachable
+- **60s read timeout** — fires if no data arrives for 60 seconds, converting a silently stalled connection into a retryable `ReadTimeout`
+
+The read timeout applies to the arrival of each chunk, not the full response, so it does not interfere with legitimately slow large downloads.
+
+### Retry budget
+
+The default retry limit is 50. This is intentionally generous: because checkpoint resumes pick up close to where the stream dropped, each retry costs only minutes rather than hours. In practice, Dropbox drops connections roughly once per hour; even a 500 GB archive would complete well within 50 retries.
+
 ## Consequences
 
 - A 50 GB file that drops at 60 min (after ~40 GB) resumes from ~39.75 GB and completes in ~15 more minutes rather than restarting from 0.
