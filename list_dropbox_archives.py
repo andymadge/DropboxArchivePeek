@@ -174,6 +174,7 @@ class ResumableGzipStream:
         self._buf = b""
         self._pending = 0
         self._pending_agg = 0
+        self._agg_flushed = 0
         self._last_flush = time.monotonic()
         self._bytes_since_checkpoint = 0
         self._checkpoint_http_pos = 0
@@ -298,6 +299,7 @@ class ResumableGzipStream:
             self._pending = 0
         if self._progress and self._agg_task_id is not None and self._pending_agg:
             self._progress.advance(self._agg_task_id, self._pending_agg)
+            self._agg_flushed += self._pending_agg
             self._pending_agg = 0
 
     def readable(self) -> bool:
@@ -341,6 +343,7 @@ def list_archive_contents(
     """
     collected: list[str] = []
     last_checkpoint: _GzipCheckpoint | None = None
+    agg_bytes_reported = 0  # bytes already advanced on the aggregate bar
 
     for attempt in range(max_retries + 1):
         skip = len(collected)
@@ -365,9 +368,7 @@ def list_archive_contents(
                 checkpoint=last_checkpoint,
                 progress=progress,
                 task_id=task_id,
-                # Only advance the aggregate task on the first attempt to
-                # avoid double-counting retried bytes.
-                agg_task_id=agg_task_id if attempt == 0 else None,
+                agg_task_id=agg_task_id,
             )
             entries_before = last_checkpoint.entries_before if last_checkpoint else 0
             # mode="r|" — raw uncompressed streaming tar; gzip is handled by ResumableGzipStream
@@ -381,6 +382,7 @@ def list_archive_contents(
                     if cp is not None:
                         last_checkpoint = cp
             stream.flush_progress()
+            agg_bytes_reported += stream._agg_flushed
             return collected
         except (tarfile.TarError, zlib.error) as exc:
             # Tar/zlib error after a checkpoint resume means the restored
@@ -389,6 +391,7 @@ def list_archive_contents(
             if last_checkpoint is not None and attempt < max_retries:
                 if stream is not None:
                     stream.flush_progress()
+                    agg_bytes_reported += stream._agg_flushed
                 _logger.info(
                     f"[ERROR] {label} — {type(exc).__name__}: {exc}"
                     f" (attempt {attempt}/{max_retries}, checkpoint resume"
@@ -396,11 +399,16 @@ def list_archive_contents(
                 )
                 last_checkpoint = None
                 collected.clear()
+                # Rewind aggregate bar so the full re-download is counted
+                if progress is not None and agg_task_id is not None and agg_bytes_reported:
+                    progress.advance(agg_task_id, -agg_bytes_reported)
+                    agg_bytes_reported = 0
                 continue
             raise
         except _RETRYABLE_ERRORS as exc:
             if stream is not None:
                 stream.flush_progress()
+                agg_bytes_reported += stream._agg_flushed
             bytes_str = f"{stream._http_pos / 1024 ** 3:.1f} GB" if stream and stream._http_pos else "0 bytes"
             _logger.info(
                 f"[ERROR] {label} — {type(exc).__name__}: {exc}"
@@ -412,6 +420,10 @@ def list_archive_contents(
                 # from the beginning on the next attempt.
                 last_checkpoint = None
                 collected.clear()
+                # Rewind aggregate bar so the full re-download is counted
+                if progress is not None and agg_task_id is not None and agg_bytes_reported:
+                    progress.advance(agg_task_id, -agg_bytes_reported)
+                    agg_bytes_reported = 0
             if attempt >= max_retries:
                 raise
 
