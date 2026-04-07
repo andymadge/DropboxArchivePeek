@@ -39,7 +39,7 @@ A one-time CLI to walk through the OAuth flow and print the refresh token:
 
 No dependencies beyond `requests` (already in Pipfile).
 
-### `list_dropbox_archives.py` changes
+### `peek_dropbox_archives.py` changes
 
 **New helper (~5 lines):**
 ```python

@@ -7,12 +7,12 @@ For .zip files, HTTP Range requests fetch just the central directory index from 
 of the file (~3 requests total, regardless of archive size).
 
 Usage:
-    DROPBOX_TOKEN=xxx python3 list_dropbox_archives.py <pattern> [<pattern> ...]
-    DROPBOX_TOKEN=xxx python3 list_dropbox_archives.py *.tgz
-    DROPBOX_TOKEN=xxx python3 list_dropbox_archives.py *.zip
-    DROPBOX_TOKEN=xxx python3 list_dropbox_archives.py *.tgz *.zip
-    DROPBOX_TOKEN=xxx python3 list_dropbox_archives.py archive1.tgz archive2.zip
-    DROPBOX_TOKEN=xxx python3 list_dropbox_archives.py /path/to/*.tgz /other/path/*.zip
+    DROPBOX_TOKEN=xxx python3 peek_dropbox_archives.py <pattern> [<pattern> ...]
+    DROPBOX_TOKEN=xxx python3 peek_dropbox_archives.py *.tgz
+    DROPBOX_TOKEN=xxx python3 peek_dropbox_archives.py *.zip
+    DROPBOX_TOKEN=xxx python3 peek_dropbox_archives.py *.tgz *.zip
+    DROPBOX_TOKEN=xxx python3 peek_dropbox_archives.py archive1.tgz archive2.zip
+    DROPBOX_TOKEN=xxx python3 peek_dropbox_archives.py /path/to/*.tgz /other/path/*.zip
 
 Arguments:
     --dropbox-root   Local Dropbox root path (default: ~/Dropbox)
@@ -687,7 +687,7 @@ def main():
             print(f"{size_str:>8}  {indexed}  {label}")
         sys.exit(0)
 
-    log_path = Path(f"dropbox_lister_{datetime.now():%Y%m%d_%H%M%S}.log")
+    log_path = Path(f"dropbox_peek_{datetime.now():%Y%m%d_%H%M%S}.log")
     _fh = logging.FileHandler(log_path)
     _fh.setFormatter(logging.Formatter("%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
     _logger.addHandler(_fh)

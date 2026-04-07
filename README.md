@@ -1,4 +1,4 @@
-# DropboxTgzLister
+# DropboxArchivePeek
 
 Lists the contents of `.tgz` and `.zip` archives stored in Dropbox without downloading them. Designed for use with Dropbox Smart Sync, where archive files exist as local placeholders but live in the cloud.
 
@@ -18,7 +18,7 @@ Lists the contents of `.tgz` and `.zip` archives stored in Dropbox without downl
 1. Go to [https://www.dropbox.com/developers/apps](https://www.dropbox.com/developers/apps) and click **Create app**
 2. Choose **Scoped access**
 3. Choose **Full Dropbox** access
-4. Give your app a name (e.g. `DropboxTgzLister`) and click **Create app**
+4. Give your app a name (e.g. `DropboxArchivePeek`) and click **Create app**
 5. On the app's **Permissions** tab, enable `files.content.read`, then click **Submit**
 
 ### 2. Generate a temporary access token
@@ -41,7 +41,7 @@ export DROPBOX_TOKEN=your_token_here
 ## Usage
 
 ```bash
-python3 list_dropbox_archives.py <file_or_pattern> [<file_or_pattern> ...]
+python3 peek_dropbox_archives.py <file_or_pattern> [<file_or_pattern> ...]
 ```
 
 ### Options
@@ -56,20 +56,27 @@ python3 list_dropbox_archives.py <file_or_pattern> [<file_or_pattern> ...]
 
 ### Examples
 
+Only `.tgz` and `.zip` files are processed — other files in a path or glob are ignored automatically.
+
 ```bash
 # Single file
-python3 list_dropbox_archives.py ~/Dropbox/Archives/backup.tgz
-python3 list_dropbox_archives.py ~/Dropbox/Archives/takeout.zip
+python3 peek_dropbox_archives.py ~/Dropbox/Archives/backup.tgz
+python3 peek_dropbox_archives.py ~/Dropbox/Archives/takeout.zip
 
-# Glob pattern
-python3 list_dropbox_archives.py ~/Dropbox/Archives/*.tgz
-python3 list_dropbox_archives.py ~/Dropbox/Archives/*.zip
+# Glob pattern (only matching archive type is processed)
+python3 peek_dropbox_archives.py ~/Dropbox/Archives/*.tgz
+python3 peek_dropbox_archives.py ~/Dropbox/Archives/*.zip
 
-# Mix TGZ and ZIP, 6 parallel workers
-python3 list_dropbox_archives.py --workers 6 ~/Dropbox/Takeout/*.tgz ~/Dropbox/Takeout/*.zip
+# Mix TGZ and ZIP in one directory — pass the directory directly, 6 parallel workers
+python3 peek_dropbox_archives.py --workers 6 ~/Dropbox/Takeout
+
+# Multiple separate paths (directories, globs, or files)
+python3 peek_dropbox_archives.py ~/Dropbox/Takeout ~/Dropbox/Backups
+python3 peek_dropbox_archives.py ~/Dropbox/Takeout ~/Dropbox/Backups/latest.tgz
+python3 peek_dropbox_archives.py ~/Dropbox/Takeout/*.tgz ~/Dropbox/Backups/*.zip
 
 # Entire directory tree, custom Dropbox root
-python3 list_dropbox_archives.py --dropbox-root ~/Documents/Dropbox ~/Documents/Dropbox/Archives
+python3 peek_dropbox_archives.py --dropbox-root ~/Documents/Dropbox ~/Documents/Dropbox/Archives
 ```
 
 ## Output
@@ -84,7 +91,7 @@ backup.tar.gz     →  backup.txt
 
 The `.txt` file contains one entry per line, sorted alphabetically. If a `.txt` file already exists for an archive, it is skipped.
 
-A timestamped log file (`dropbox_lister_YYYYMMDD_HHMMSS.log`) is written to the current directory.
+A timestamped log file (`dropbox_peek_YYYYMMDD_HHMMSS.log`) is written to the current directory.
 
 ## Status output
 
