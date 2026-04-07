@@ -483,6 +483,11 @@ def resolve_paths(patterns: list[str]) -> list[tuple[Path, Path]]:
     return paths
 
 
+def _archive_stem(archive_path: Path) -> str:
+    raw_name = archive_path.name
+    return raw_name[: -len(".tar.gz")] if raw_name.endswith(".tar.gz") else archive_path.stem
+
+
 def _fmt_duration(seconds: float) -> str:
     if seconds < 60:
         return f"{seconds:.1f}s"
@@ -505,9 +510,8 @@ def process_one(
     if stop_new.is_set():
         return
 
-    raw_name = archive_path.name
     label = str(archive_path.relative_to(display_root))
-    stem = raw_name[: -len(".tar.gz")] if raw_name.endswith(".tar.gz") else archive_path.stem
+    stem = _archive_stem(archive_path)
     output_path = archive_path.parent / (stem + ".txt")
     output_label = str(output_path.relative_to(display_root))
 
@@ -664,8 +668,7 @@ def main():
     if args.list:
         for archive_path, display_root in archive_files:
             label = str(archive_path.relative_to(display_root))
-            raw_name = archive_path.name
-            stem = raw_name[: -len(".tar.gz")] if raw_name.endswith(".tar.gz") else archive_path.stem
+            stem = _archive_stem(archive_path)
             indexed = "[yes]" if (archive_path.parent / (stem + ".txt")).exists() else "[ no]"
             try:
                 dropbox_path = local_to_dropbox_path(archive_path, dropbox_root)
