@@ -542,7 +542,7 @@ def process_one(
     if file_size:
         with agg_lock:
             current_total = progress.tasks[agg_task_id].total or 0
-            progress.update(agg_task_id, total=current_total + file_size)
+            progress.update(agg_task_id, total=current_total + file_size, visible=True)
 
     task_id = None
     try:
@@ -551,6 +551,10 @@ def process_one(
 
         if archive_path.suffix.lower() == ".zip":
             contents = list_zip_contents(link)
+            # Zip processing uses range requests with no per-byte streaming,
+            # so advance the aggregate bar by the full file size on completion.
+            if file_size:
+                progress.advance(agg_task_id, file_size)
         else:
             contents = list_archive_contents(link, file_size, label, progress, task_id, agg_task_id, max_retries)
 
@@ -705,7 +709,7 @@ def main():
         console=_console,
         refresh_per_second=2,
     ) as progress:
-        agg_task_id = progress.add_task("Total", total=0)
+        agg_task_id = progress.add_task("Total", total=0, visible=False)
         agg_lock = threading.Lock()
         stop_new = threading.Event()
         with ThreadPoolExecutor(max_workers=args.workers) as executor:
