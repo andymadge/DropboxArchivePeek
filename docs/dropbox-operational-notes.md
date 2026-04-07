@@ -36,7 +36,20 @@ This has been observed infrequently. Most resume attempts receive a correct 206.
 
 ---
 
-## 3. Temporary links expire after 4 hours
+## 3. ZIP probing requires a GET request, not HEAD
+
+When opening a ZIP file, `RangeRequestFile.__init__` needs to confirm the server supports range requests and get the total file size. The obvious approach is a HEAD request, but `requests.head()` defaults to `allow_redirects=False`. Dropbox temporary links redirect to a CDN, so a HEAD returns a `302` with no `Content-Length`, causing an immediate `ValueError` before any range requests are attempted.
+
+The fix is a minimal GET with `Range: bytes=0-0`. This:
+- Follows redirects automatically
+- Returns a `206` response confirming range support
+- Includes `Content-Range: bytes 0-0/<total>` from which the full file size is parsed
+
+This also means the range-support check is a real validation, not just an assumption.
+
+---
+
+## 4. Temporary links expire after 4 hours
 
 Temporary download links obtained via `files/get_temporary_link` expire after 4 hours. If a run exceeds 4 hours (e.g. many large archives with multiple workers), subsequent API calls will receive `401 Unauthorized`.
 
