@@ -5,6 +5,14 @@ Lists the contents of `.tgz` and `.zip` archives stored in Dropbox without downl
 - **TGZ**: streams the archive over HTTP and reads only the tar headers, with checkpoint-based resumption on connection drops
 - **ZIP**: uses HTTP Range requests to fetch just the central directory index from the end of the file (~3 requests, regardless of archive size)
 
+## Motivation
+
+[Google Takeout](https://takeout.google.com) lets you export all your Google data as a set of archives. One of the destination options is Dropbox — Takeout uploads the archives directly to a folder in your Dropbox. The problem is that the filenames are completely opaque: just a timestamp and an incrementing sequence number (e.g. `takeout-20250101T120000Z-001.zip`). There's no way to know which archive contains what without downloading and extracting each one. Some archives can be 50 GB or more, so inspecting them all would require enormous amounts of local disk space.
+
+This tool solves that problem. Because the archive files are already in Dropbox, it can fetch their contents over HTTP using the Dropbox API and write a plain-text index alongside each archive — no local copy of the archive is ever saved to disk. For ZIP files, only a small portion at the end of the file (the central directory) needs to be fetched at all. For TGZ files, the entire archive still needs to be streamed to read the headers, so large files will take time and consume bandwidth, but again nothing is written to disk.
+
+While the Google Takeout case is the primary motivation, the tool works for any `.tgz` or `.zip` files stored in Dropbox.
+
 ## Requirements
 
 - Python 3.12+
