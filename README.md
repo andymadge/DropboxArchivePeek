@@ -99,7 +99,7 @@ backup.tar.gz     →  backup.txt
 
 The `.txt` file contains one entry per line, sorted alphabetically. If a `.txt` file already exists for an archive, it is skipped.
 
-A timestamped log file (`dropbox_peek_YYYYMMDD_HHMMSS.log`) is written to the current directory.
+A timestamped log file (`logs/dropbox_peek_YYYYMMDD_HHMMSS.log`) is written to a `logs/` subdirectory of the current directory (created automatically).
 
 ## Status output
 

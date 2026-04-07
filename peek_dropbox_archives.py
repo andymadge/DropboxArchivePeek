@@ -687,7 +687,9 @@ def main():
             print(f"{size_str:>8}  {indexed}  {label}")
         sys.exit(0)
 
-    log_path = Path(f"dropbox_peek_{datetime.now():%Y%m%d_%H%M%S}.log")
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+    log_path = log_dir / f"dropbox_peek_{datetime.now():%Y%m%d_%H%M%S}.log"
     _fh = logging.FileHandler(log_path)
     _fh.setFormatter(logging.Formatter("%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
     _logger.addHandler(_fh)
