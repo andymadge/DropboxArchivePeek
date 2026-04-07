@@ -16,11 +16,15 @@ Usage:
 
 Arguments:
     --dropbox-root   Local Dropbox root path (default: ~/Dropbox)
-    --list           Just list archive files and their sizes without downloading
     --workers N      Number of parallel workers (default: 1 = sequential)
+    --max-retries N  Max retries per archive on connection failure (default: 50)
+    --no-sort        Write entries in original order instead of sorted
+    --no-summary     Skip writing _summary.txt files
+    --list           List archive files and sizes without processing
 
 Directories are recursed automatically — specifying a directory finds all
-.tgz, .gz, and .zip files within it and all subdirectories.
+.tgz and .zip files within it and all subdirectories. To avoid recursion,
+use a glob instead of a directory path (e.g. ~/Dropbox/Takeout/*.tgz).
 """
 
 import argparse
