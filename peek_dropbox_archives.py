@@ -488,6 +488,37 @@ def _archive_stem(archive_path: Path) -> str:
     return raw_name[: -len(".tar.gz")] if raw_name.endswith(".tar.gz") else archive_path.stem
 
 
+def write_summary(archive_path: Path, display_root: Path) -> None:
+    """Write a _summary.txt listing unique second-level dirs from the archive listing.
+
+    Second-level dirs are the product/category names one level below the
+    archive root (e.g. 'Google Photos', 'Drive' in a Google Takeout archive).
+    Skipped silently if the listing doesn't exist or the summary already exists.
+    """
+    stem = _archive_stem(archive_path)
+    listing_path = archive_path.parent / (stem + ".txt")
+    summary_path = archive_path.parent / (stem + "_summary.txt")
+
+    if not listing_path.exists() or summary_path.exists():
+        return
+
+    products: set[str] = set()
+    for line in listing_path.read_text().splitlines():
+        parts = Path(line).parts
+        if len(parts) >= 2:
+            products.add(parts[1])
+
+    if not products:
+        return
+
+    summary_path.write_text("\n".join(sorted(products)) + "\n")
+    label = str(archive_path.relative_to(display_root))
+    summary_label = str(summary_path.relative_to(display_root))
+    msg = f"[SUMM] {label} → {summary_label}"
+    _console.print(msg, markup=False)
+    _logger.info(msg)
+
+
 def _fmt_duration(seconds: float) -> str:
     if seconds < 60:
         return f"{seconds:.1f}s"
@@ -506,6 +537,7 @@ def process_one(
     stop_new: threading.Event,
     sort: bool = True,
     max_retries: int = _MAX_RETRIES,
+    summarize: bool = True,
 ) -> None:
     if stop_new.is_set():
         return
@@ -572,6 +604,8 @@ def process_one(
         )
         progress.console.print(msg, markup=False)
         _logger.info(msg)
+        if summarize:
+            write_summary(archive_path, display_root)
 
     except requests.HTTPError as e:
         elapsed = time.perf_counter() - file_start
@@ -638,6 +672,11 @@ def main():
         "--no-sort",
         action="store_true",
         help="Write archive entries in original order instead of sorted",
+    )
+    parser.add_argument(
+        "--no-summary",
+        action="store_true",
+        help="Skip writing _summary.txt files listing second-level directories",
     )
     parser.add_argument(
         "--max-retries",
@@ -719,7 +758,7 @@ def main():
         stop_new = threading.Event()
         with ThreadPoolExecutor(max_workers=args.workers) as executor:
             for archive_path, display_root in archive_files:
-                fut = executor.submit(process_one, archive_path, display_root, dropbox_root, token, progress, agg_task_id, agg_lock, stop_new, not args.no_sort, args.max_retries)
+                fut = executor.submit(process_one, archive_path, display_root, dropbox_root, token, progress, agg_task_id, agg_lock, stop_new, not args.no_sort, args.max_retries, not args.no_summary)
                 futures[fut] = archive_path
 
             try:
@@ -786,6 +825,10 @@ def main():
                     executor.shutdown(wait=False, cancel_futures=True)
                     sys.stderr.write("\n[INTERRUPTED]\n")
                     os._exit(130)
+
+    if not args.no_summary:
+        for archive_path, display_root in archive_files:
+            write_summary(archive_path, display_root)
 
     total_elapsed = time.perf_counter() - total_start
     print(f"\nDone in {_fmt_duration(total_elapsed)}")

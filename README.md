@@ -60,6 +60,7 @@ python3 peek_dropbox_archives.py <file_or_pattern> [<file_or_pattern> ...]
 | `--workers N` | `1` | Number of parallel workers |
 | `--max-retries N` | `50` | Max retries per archive on connection failure |
 | `--no-sort` | — | Write entries in original order instead of sorted |
+| `--no-summary` | — | Skip writing `_summary.txt` files |
 | `--list` | — | List archive files and sizes without processing |
 
 ### Examples
@@ -99,6 +100,19 @@ backup.tar.gz     →  backup.txt
 
 The `.txt` file contains one entry per line, sorted alphabetically. If a `.txt` file already exists for an archive, it is skipped.
 
+### Summary files
+
+A `_summary.txt` file is written alongside each archive immediately after its listing is generated, containing the unique second-level directories from the listing — one per line, sorted alphabetically:
+
+```
+takeout-20250101T120000Z-001.zip   →  takeout-20250101T120000Z-001.txt
+                                      takeout-20250101T120000Z-001_summary.txt
+```
+
+This is particularly useful for Google Takeout archives, where second-level directories correspond to Google products (e.g. `Google Photos`, `Drive`, `Gmail`). Glancing at the summary lets you decide whether you need to keep or download an archive without opening it.
+
+If a summary is missing for an archive that already has a listing (e.g. from a previous run), it will be generated automatically. Use `--no-summary` to disable summary generation entirely — useful if your archives don't follow a two-level directory structure.
+
 A timestamped log file (`logs/dropbox_peek_YYYYMMDD_HHMMSS.log`) is written to a `logs/` subdirectory of the current directory (created automatically).
 
 ## Status output
@@ -108,6 +122,7 @@ A timestamped log file (`logs/dropbox_peek_YYYYMMDD_HHMMSS.log`) is written to a
 [SKIP] backup-2025-02.zip — listing already exists (backup-2025-02.txt)
 [FAIL] backup-2025-03.tgz — tar error: invalid header (5m12s)
 [RETRY] backup-2025-04.tgz — connection dropped after 1502 entries, resuming from 12.3 GB (attempt 1/50)...
+[SUMM] backup-2025-01.tgz → backup-2025-01_summary.txt
 ```
 
 ## Resumption on connection drops
