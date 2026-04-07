@@ -551,6 +551,8 @@ def process_one(
         msg = f"[SKIP] {label} — listing already exists ({output_label})"
         progress.console.print(msg, markup=False)
         _logger.info(msg)
+        if summarize:
+            write_summary(archive_path, display_root)
         return
 
     try:
@@ -825,10 +827,6 @@ def main():
                     executor.shutdown(wait=False, cancel_futures=True)
                     sys.stderr.write("\n[INTERRUPTED]\n")
                     os._exit(130)
-
-    if not args.no_summary:
-        for archive_path, display_root in archive_files:
-            write_summary(archive_path, display_root)
 
     total_elapsed = time.perf_counter() - total_start
     print(f"\nDone in {_fmt_duration(total_elapsed)}")
