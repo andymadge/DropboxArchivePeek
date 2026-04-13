@@ -700,7 +700,11 @@ def main():
 
     token = os.environ.get("DROPBOX_TOKEN")
     if not token:
-        print("Error: DROPBOX_TOKEN environment variable not set", file=sys.stderr)
+        print(
+            "Error: DROPBOX_TOKEN environment variable not set\n"
+            "Generate a token at: https://www.dropbox.com/developers/apps",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     dropbox_root = Path(args.dropbox_root).expanduser().resolve()
